@@ -1,0 +1,30 @@
+{
+  "packageManager": "pnpm@8.9.0",
+  "name": "monorepo-template",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "ts-packages/*"
+  ],
+  "pnpm": {
+    "overrides": {
+      "@types/pg": "8.15.2"
+    }
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "start:dev": "docker compose -f docker-compose.local.yml up -d --build && pnpm run watch",
+    "watch": "turbo run watch",
+    "buf:gen": "buf generate",
+    "log-tool": "./log-tool.sh"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "blessed": "^0.1.81",
+    "child_process": "^1.0.2",
+    "prettier": "^3.5.3",
+    "turbo": "^2.5.3",
+    "typescript": "^5.8.2"
+  }
+}

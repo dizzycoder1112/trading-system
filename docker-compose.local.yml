@@ -1,0 +1,46 @@
+services:
+  ts-restful-api:
+    build:
+      context: ./
+      dockerfile: apps/ts-restful-api/Dockerfile.local
+    expose:
+      - '3000'
+    env_file:
+      - ./apps/ts-restful-api/.env
+    volumes:
+      - ./apps/ts-restful-api/src:/app/apps/ts-restful-api/src
+      - ./ts-packages:/app/ts-packages
+    networks:
+      - app-network
+
+  ts-user:
+    build:
+      context: ./
+      dockerfile: apps/ts-user/Dockerfile.local
+    expose:
+      - '3000'
+    env_file:
+      - ./apps/ts-user/.env
+    volumes:
+      - ./apps/ts-user/src:/app/apps/ts-user/src
+      - ./ts-packages:/app/ts-packages
+    networks:
+      - app-network
+
+  go-hello:
+    build:
+      context: .
+      dockerfile: ./apps/go-hello/Dockerfile.local
+    expose:
+      - '3000'
+    env_file:
+      - ./apps/go-hello/.env
+    volumes:
+      - ./apps/go-hello:/app/apps/go-hello
+      - ./go-packages:/app/go-packages
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

@@ -1,0 +1,20 @@
+{
+  "name": "@ts-packages/shared",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "./constants": "./dist/constants/index.js",
+    "./utils": "./dist/utils/index.js",
+    "./types": "./dist/types/index.js"
+  },
+  "scripts": {
+    "build": "rm -rf ./dist && tsc -p tsconfig.prod.json",
+    "watch": "tsc -p tsconfig.prod.json --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.6.5"
+}

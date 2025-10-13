@@ -1,0 +1,29 @@
+{
+  "name": "@ts-packages/db",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "rm -rf ./dist && tsc -p tsconfig.prod.json",
+    "watch": "tsc -p tsconfig.prod.json --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.6.5",
+  "devDependencies": {
+    "@types/node": "^22.13.11",
+    "@types/pg": "^8.11.11",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@ts-packages/shared": "workspace:*",
+    "kysely": "^0.27.6",
+    "pg": "^8.14.1"
+  }
+}

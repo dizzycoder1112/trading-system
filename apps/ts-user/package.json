@@ -1,0 +1,33 @@
+{
+  "name": "@apps/ts-user",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "rm -rf ./dist && tsc -p tsconfig.prod.json",
+    "start:dev": "NODE_ENV=local tsx watch --clear-screen=false -r tsconfig-paths/register ./src/index.ts",
+    "start:prod": "NODE_ENV=production node ./dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.6.5",
+  "dependencies": {
+    "@ts-packages/db": "workspace:*",
+    "@ts-packages/grpc": "workspace:*",
+    "@ts-packages/logger": "workspace:*",
+    "@ts-packages/shared": "workspace:*",
+    "znv": "^0.4.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.11",
+    "tsconfig-paths": "^4.2.0",
+    "tsx": "^4.19.4"
+  }
+}
