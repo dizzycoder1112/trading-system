@@ -1,0 +1,14 @@
+services:
+  market-data-server:
+    build:
+      context: .
+      dockerfile: ./apps/market-data-server/Dockerfile.local
+    volumes:
+      - ./apps/market-data-server:/app/apps/market-data-server
+      - ./go-packages:/workspace/go-packages
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

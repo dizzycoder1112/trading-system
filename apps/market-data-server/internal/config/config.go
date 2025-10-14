@@ -20,7 +20,9 @@ type OKXConfig struct {
 
 var AppConfig *Config
 
-func Load() {
+// Load loads configuration from environment variables and returns it
+// Also sets the global AppConfig for backward compatibility
+func Load() *Config {
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("⚠️  No .env file found")
@@ -29,7 +31,7 @@ func Load() {
 	instruments := getEnvOrDefault("OKX_INSTRUMENTS", "BTC-USDT,ETH-USDT")
 	instList := parseInstruments(instruments)
 
-	AppConfig = &Config{
+	cfg := &Config{
 		Port:        requireEnv("PORT"),
 		Environment: requireEnv("ENVIRONMENT"),
 		LogLevel:    getEnvOrDefault("LOG_LEVEL", "info"),
@@ -38,6 +40,8 @@ func Load() {
 		},
 	}
 
+	AppConfig = cfg // Keep global for backward compatibility
+	return cfg
 }
 
 func requireEnv(key string) string {

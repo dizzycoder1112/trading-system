@@ -18,15 +18,6 @@ const (
 // MessageHandler 處理接收到的消息
 type MessageHandler func(messageType int, data []byte) error
 
-// Logger 日誌接口（讓使用者注入自己的 logger）
-// 使用 interface{} 保持通用性，不綁定特定日誌庫
-type Logger interface {
-	Info(msg string, fields ...any)
-	Error(msg string, fields ...any)
-	Debug(msg string, fields ...any)
-	Warn(msg string, fields ...any)
-}
-
 // Config WebSocket 客戶端配置
 type Config struct {
 	URL          string
@@ -49,7 +40,14 @@ type Client struct {
 }
 
 // NewClient 創建新的 WebSocket 客戶端
-func NewClient(config Config, logger Logger) *Client {
+// If logger is nil, it will fallback to defaultLog (internal console logger)
+// This is similar to TypeScript's pattern: this.logger = logger ?? console
+func NewClient(config Config, log Logger) *Client {
+	// Fallback to default console logger if not provided
+	if log == nil {
+		log = defaultLog
+	}
+
 	if config.PingInterval == 0 {
 		config.PingInterval = DefaultPingInterval
 	}
@@ -63,7 +61,7 @@ func NewClient(config Config, logger Logger) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		config:      config,
-		logger:      logger,
+		logger:      log,
 		ctx:         ctx,
 		cancel:      cancel,
 		done:        make(chan struct{}),
@@ -102,7 +100,7 @@ func (c *Client) Connect() error {
 }
 
 // SendJSON 發送 JSON 消息
-func (c *Client) SendJSON(v interface{}) error {
+func (c *Client) SendJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

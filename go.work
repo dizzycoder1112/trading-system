@@ -3,4 +3,6 @@ go 1.25.1
 use (
 	./apps/market-data-server
 	./go-packages/logger
+	./go-packages/websocket
+	./go-packages/rabbitMQ
 )
