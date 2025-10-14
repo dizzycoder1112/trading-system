@@ -2,6 +2,7 @@ go 1.25.1
 
 use (
 	./apps/market-data-server
+	./apps/trading-strategy-server
 	./go-packages/logger
 	./go-packages/websocket
 	./go-packages/rabbitMQ
