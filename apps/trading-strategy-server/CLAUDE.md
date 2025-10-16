@@ -210,6 +210,8 @@ REDIS_ADDR=db.redis.orb.local:6379
 
 **說明**：領域層和應用層已完成，現在需要實作基礎設施層的適配器（Adapters）
 
+**Note**: Redis channel 使用 `.` 作為分隔符（例如：`market.ticker.ETH-USDT`）
+
 #### 1. **Redis 客戶端** (`internal/infrastructure/messaging/redis_client.go`)
 - [ ] 創建 Redis 客戶端封裝
 - [ ] 支援連接池
@@ -238,7 +240,7 @@ func NewRedisClient(addr, password string, db int, logger logger.Logger) (*Redis
 
 #### 2. **Candle 訂閱器** (`internal/infrastructure/messaging/candle_subscriber.go`)
 - [ ] 實作 Redis Pub/Sub 訂閱器
-- [ ] 訂閱 `market:candle:1m:{instId}` 頻道
+- [ ] 訂閱 `market.candle.1m.{instId}` 頻道
 - [ ] 解析 JSON 為 Candle 結構
 - [ ] 提取價格並傳遞給應用層
 
@@ -258,7 +260,7 @@ func (s *CandleSubscriber) Subscribe(
     bar string,
     onCandle func(price float64) error,
 ) error {
-    channel := fmt.Sprintf("market:candle:%s:%s", bar, instID)
+    channel := fmt.Sprintf("market.candle.%s.%s", bar, instID)
 
     pubsub := s.client.rdb.Subscribe(ctx, channel)
     defer pubsub.Close()
@@ -294,7 +296,7 @@ func (s *CandleSubscriber) Subscribe(
 #### 3. **Signal 發布器** (`internal/infrastructure/messaging/signal_publisher.go`)
 - [ ] 實作 `SignalPublisher` 介面（應用層定義的端口）
 - [ ] 將 Signal 發布到 Redis Pub/Sub
-- [ ] 頻道命名: `trading:signal:{instId}`
+- [ ] 頻道命名: `strategy.signals.{instId}`
 - [ ] JSON 序列化
 
 **實作範例**:
@@ -313,7 +315,7 @@ func NewRedisSignalPublisher(client *RedisClient, logger logger.Logger) *RedisSi
 
 // Publish 實作 application.SignalPublisher 介面
 func (p *RedisSignalPublisher) Publish(ctx context.Context, signal strategy.Signal) error {
-    channel := fmt.Sprintf("trading:signal:%s", signal.InstID())
+    channel := fmt.Sprintf("strategy.signals.%s", signal.InstID())
 
     // Signal 已實作 MarshalJSON，直接序列化
     data, err := json.Marshal(signal)
@@ -448,7 +450,7 @@ func TestGridAggregate_ProcessPriceUpdate(t *testing.T) {
 ```
 Market Data Service
     ↓ 發布 Candle 數據
-Redis Pub/Sub (market:candle:1m:ETH-USDT)
+Redis Pub/Sub (market.candle.1m.ETH-USDT)
     ↓ 訂閱 (CandleSubscriber - Infrastructure)
 Trading Strategy Server
     ↓ 提取價格
@@ -460,10 +462,10 @@ Application Layer
     ↓ 通過端口發布
 Infrastructure Layer (RedisSignalPublisher)
     ↓ 發布信號
-Redis Pub/Sub (trading:signal:ETH-USDT)
+Redis Pub/Sub (strategy.signals.ETH-USDT)
     ↓ 訂閱
-Order Manager Service (未實作)
-    ↓ 執行交易
+Order Service (未實作)
+    ↓ 驗證並執行交易
 OKX API
 ```
 

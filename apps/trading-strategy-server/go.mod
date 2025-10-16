@@ -1,4 +1,4 @@
-module dizzycoder.xyz/trading-strategy-server
+module dizzycode.xyz/trading-strategy-server
 
 go 1.25.1
 

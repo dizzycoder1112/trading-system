@@ -2,7 +2,7 @@ package logger
 
 import (
 	"dizzycode.xyz/logger"
-	"dizzycoder.xyz/trading-strategy-server/internal/infrastructure/config"
+	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/config"
 )
 
 // New creates a logger instance based on configuration

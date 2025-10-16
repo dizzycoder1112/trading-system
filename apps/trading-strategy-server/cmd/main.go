@@ -5,8 +5,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"dizzycoder.xyz/trading-strategy-server/internal/infrastructure/config"
-	"dizzycoder.xyz/trading-strategy-server/internal/infrastructure/logger"
+	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/config"
+	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/logger"
 )
 
 func main() {

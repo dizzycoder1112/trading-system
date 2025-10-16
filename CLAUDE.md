@@ -18,14 +18,15 @@ A microservices-based grid trading bot system built primarily with Golang, desig
 ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌──────────┐
 │ Market  │  │ Trading  │  │ Order   │  │ Risk     │
 │ Data    │  │ Strategy │  │ Service │  │ Manager  │
-│ Service │  │ Service  │  │         │  │ Service  │
+│ Service │  │ Service  │  │(Executor)│  │ Service  │
 └─────────┘  └──────────┘  └─────────┘  └──────────┘
-     │             │             │              │
+     │             ▲             │              │
      │             │ gRPC        │              │
-     │ Redis       └────────────►│              │
-     │ Pub/Sub                   │              │
-     │                           │              │
-     └───────────────────────────┴──────────────┘
+     │ Redis       │"What should │              │
+     │ Pub/Sub     │ I do now?"  │              │
+     │             └─────────────┘              │
+     │                                          │
+     └──────────────────────────────────────────┘
                    │
               ┌────┴────┐
               │         │
@@ -37,10 +38,18 @@ A microservices-based grid trading bot system built primarily with Golang, desig
 
 ### Communication Patterns
 
-- **Market Data → Strategy**: Redis Pub/Sub (broadcast, one-to-many)
-- **Strategy → Order**: gRPC (request-response, needs confirmation) ⭐
+- **Market Data → Strategy**: Redis Pub/Sub (broadcast, price updates)
+- **Strategy → Order**: Redis Pub/Sub (signal push, trading signals) ⭐ **HYBRID MODEL**
 - **Order → OKX**: REST API + Private WebSocket (external API)
 - **All Services → Redis/DB**: Direct connection
+
+### Key Design Decision ⭐
+
+**Hybrid Model: Strategy pushes signals, Order validates and executes**:
+- **Strategy Service**: Continuously monitors prices and publishes trading signals (should we trade?)
+- **Order Service**: Subscribes to signals, validates feasibility, calculates quantity (can we trade? + how much?)
+- **Clear separation of concerns**: Strategy = trading logic, Order = risk control + execution
+- **Benefits**: Decoupled, scalable, single decision point for strategy logic
 
 ## Core Services
 
@@ -76,61 +85,89 @@ WS  /ws/v1/subscribe                # WebSocket subscription
 
 ---
 
-### 2. Trading Strategy Service (Go) - DDD Architecture
+### 2. Trading Strategy Service (Go) - DDD Architecture ⭐ **The Signal Generator**
 
-**Purpose**: Calculate trading strategies and generate signals
+**Purpose**: Continuously monitor market and generate trading signals based on strategy logic
 
 **Responsibilities**:
-- Subscribe to Market Data Service price updates (via Redis Pub/Sub)
-- Calculate grid strategy (grid lines, trigger conditions)
-- Generate buy/sell signals (Signal value objects)
-- Manage grid state and positions (GridAggregate)
-- **Send signals to Order Service via gRPC** ⭐
+- **Subscribe to Market Data Service** for latest price updates (via Redis Pub/Sub)
+- Calculate grid strategy logic (grid lines, trigger conditions)
+- **Publish trading signals** to Redis Pub/Sub (via `strategy:signals:{instId}` channel)
+- **Stateless design** - only focuses on "should we trade?" not "can we trade?"
+- Generate signals based purely on price action and strategy parameters
 
 **Architecture**: Domain-Driven Design (DDD)
-- **Domain Layer**: Pure business logic (GridAggregate, Price, Signal, Calculator)
-- **Application Layer**: Use case orchestration (StrategyService)
-- **Infrastructure Layer**: Technical implementations (Redis subscriber, gRPC client)
+- **Domain Layer**: Pure business logic (Grid Calculator, Price, Signal Generator)
+- **Application Layer**: Use case orchestration (Signal Publishing Service)
+- **Infrastructure Layer**: Redis price subscriber + signal publisher
 
 **Grid Strategy Parameters**:
 - Upper price bound
 - Lower price bound
 - Number of grid levels
 - Grid spacing (arithmetic/geometric)
-- Position sizing per grid
+- Signal generation thresholds
 
 **Communication**:
 - Input: Price updates from Market Data Service (via Redis Pub/Sub)
-- Output: Trading signals to Order Service (via gRPC) ⭐
+- Output: Trading signals published to Redis Pub/Sub ⭐
 
-**Why gRPC for Strategy → Order**:
-- ✅ Synchronous response (know if order was accepted/rejected)
-- ✅ Error handling (balance insufficient, invalid price, etc.)
-- ✅ Type safety (Protocol Buffers)
-- ✅ Retry mechanism support
+**Signal Structure**:
+```go
+type TradingSignal struct {
+    InstID    string    // Trading pair
+    Action    Action    // BUY/SELL/CLOSE_LONG/CLOSE_SHORT
+    Price     float64   // Trigger price
+    Reason    string    // "Grid level #5 triggered at $50000"
+    Timestamp time.Time // Signal generation time
+    GridLevel int       // Which grid level triggered
+}
+```
+
+**Why Push Model (Strategy → Order)** ⭐:
+- ✅ Strategy is proactive: Continuously monitors and generates signals
+- ✅ Better decoupling: Strategy doesn't need to know Order Service exists
+- ✅ Scalable: Multiple services can subscribe to same signals
+- ✅ Event-driven: Follows typical financial system patterns (Signal → Execution)
+- ✅ Clear responsibility: Strategy = "should trade?", Order = "can trade? + how much?"
 
 ---
 
-### 3. Order Service (Go)
+### 3. Order Service (Go) ⭐ **The Executor/Validator**
 
-**Purpose**: Execute orders and manage order lifecycle ⭐ **The ONLY service with OKX API Key**
+**Purpose**: Validate signals and execute orders - **The ONLY service with OKX API Key**
 
 **Responsibilities**:
-- **Receive trading signals via gRPC** (from Trading Strategy Service)
+- **Subscribe to trading signals** from Strategy Service (via Redis Pub/Sub)
+- **Validate signal feasibility** - check if order can be executed
+- **Maintain position state** - track holdings, cost basis, P&L
+- **Calculate order quantity** based on position size and risk limits
 - **Execute orders via OKX REST API** (place buy/sell orders)
 - **Subscribe to OKX Private WebSocket** (monitor order fills)
-- **Decide when order is filled** and trigger exit orders ⭐
-- **Set take-profit and stop-loss orders** after entry fills
+- **Monitor fills and update position state**
 - Track order status (pending, filled, cancelled)
 - Handle order failures and retries
 - Maintain order history in PostgreSQL
 
-**gRPC Service Definition**:
-```protobuf
-service OrderService {
-  rpc SubmitSignal(SignalRequest) returns (SignalResponse);
-  rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse);
-  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+**Signal Validation Logic**:
+```go
+// Order Service subscribes to signals
+func (o *OrderService) OnSignal(signal TradingSignal) {
+    // 1. Get current position
+    position := o.getPosition(signal.InstID)
+
+    // 2. Validate if signal can be executed
+    if !o.canExecute(signal, position) {
+        o.logger.Info("Signal ignored",
+            "reason", "insufficient balance or position limit reached")
+        return
+    }
+
+    // 3. Calculate order quantity (Order Service's responsibility)
+    quantity := o.calculateQuantity(signal, position)
+
+    // 4. Place order via OKX API
+    o.placeOrder(signal.Action, signal.Price, quantity)
 }
 ```
 
@@ -141,24 +178,36 @@ POST /api/v5/trade/order           # Place order
 GET  /api/v5/trade/order           # Get order details
 GET  /api/v5/trade/orders-pending  # Get pending orders
 POST /api/v5/trade/cancel-order    # Cancel order
+GET  /api/v5/account/positions     # Get current positions
 
 # WebSocket (Private - Requires Signature)
 wss://ws.okx.com:8443/ws/v5/private
 Subscribe: {"op":"subscribe","args":[{"channel":"orders","instType":"SPOT"}]}
 ```
 
-**Order Lifecycle** ⭐:
-1. **Receive Signal** (via gRPC from Strategy Service)
-2. **Place Order** (via OKX REST API)
-3. **Monitor Fill** (via OKX Private WebSocket)
-4. **On Fill**: Set exit orders (take-profit + stop-loss)
-5. **Update Database** (order state, position)
+**Trading Loop Lifecycle** ⭐:
+1. **Receive signal** from Strategy Service (via Redis Pub/Sub)
+2. **Get current position** (from local state or OKX API)
+3. **Validate signal** (check balance, position limits, risk controls)
+4. **Calculate quantity** (based on position size and risk parameters)
+5. **Execute order** (place order via OKX REST API)
+6. **Monitor fill** (via OKX Private WebSocket)
+7. **Update position state** (recalculate cost basis, P&L)
+
+**Validation Rules**:
+- Check available balance before buy orders
+- Check position size before sell orders
+- Verify signal is not stale (timestamp check)
+- Prevent duplicate orders (debouncing)
+- Apply risk limits (max position size, daily loss limit)
 
 **Features**:
+- Event-driven signal processing
 - Order retry logic with exponential backoff
-- Order validation before submission
+- Signal validation and risk controls
 - Real-time order status updates via Private WebSocket
-- Automatic exit order placement on fill
+- Position state management (holdings, cost basis, unrealized P&L)
+- Order deduplication and throttling
 
 ---
 
@@ -203,59 +252,103 @@ OKX WebSocket (Public)
   ↓
 Market Data Service
   ↓ Publish
-Redis Pub/Sub (market:candle:1m:ETH-USDT)
+Redis Pub/Sub (market.ticker.BTC-USDT-SWAP)
   ↓ Subscribe
-Trading Strategy Service
-  ↓ Calculate Grid Strategy
-Generate Signal {Action: BUY, Price: 2500, Quantity: 0.01}
+Trading Strategy Service (monitors price, generates signals)
 ```
 
-### 2. Order Execution Flow (gRPC - Request/Response) ⭐
+### 2. Signal Generation Flow (Strategy → Redis) ⭐ **HYBRID MODEL**
 ```
 Trading Strategy Service
-  ↓ gRPC Call: SubmitSignal(signal)
-Order Service (gRPC Server)
-  ↓ Validate & Place Order
+  ↓ Receive price update: BTC-USDT-SWAP = $50000
+  ↓ Calculate grid logic
+Grid Calculator: "Price $50000 hits grid level #5 (sell trigger)"
+  ↓ Generate signal
+Signal: {Action: SELL, Price: 50000, Reason: "Grid level #5 triggered", GridLevel: 5}
+  ↓ Publish to Redis
+Redis Pub/Sub (strategy.signals.BTC-USDT-SWAP)
+```
+
+### 3. Signal Execution Flow (Redis → Order Service) ⭐
+```
+Redis Pub/Sub (strategy.signals.BTC-USDT-SWAP)
+  ↓ Subscribe
+Order Service - Receives Signal
+  ↓ Signal: {Action: SELL, Price: 50000, Reason: "Grid level #5"}
+  ↓ 1. Get current position
+Position: {size: 0.5 BTC, avgCost: $48000, balance: $10000}
+  ↓ 2. Validate signal
+Validation: ✅ Can sell (have 0.5 BTC)
+  ↓ 3. Calculate quantity
+Quantity: 0.1 BTC (based on grid size + risk limits)
+  ↓ 4. Execute order
 OKX REST API (POST /api/v5/trade/order)
-  ↓ Return Order ID
-Order Service
-  ↓ Response: {success: true, orderId: "123456"}
-Trading Strategy Service ← Receives confirmation
-  ↓ Continue or handle error
+  ↓ 5. Update database
 PostgreSQL (orders table)
 ```
 
-### 3. Order Fill Monitoring Flow (Private WebSocket) ⭐
+### 4. Order Fill Monitoring Flow (Private WebSocket) ⭐
 ```
 Order Service
   ↓ Subscribe (with API Key signature)
 OKX Private WebSocket (orders channel)
   ↓ Push fill event
-Order Update: {orderId: "123456", state: "filled", avgPx: "2500.5"}
+Order Update: {orderId: "123456", state: "filled", avgPx: "50000"}
   ↓ Handle fill event
 Order Service - onOrderFilled()
-  ↓ 1. Update database
-  ↓ 2. Update position
-  ↓ 3. Set exit orders (take-profit + stop-loss)
-OKX REST API (Place exit orders)
+  ↓ 1. Update position state (new cost basis, size)
+Position updated: {size: 0.4 BTC, avgCost: $48500}
+  ↓ 2. Update database
+PostgreSQL: Save trade record
+  ↓ 3. Wait for new signals
+(Strategy Service continues monitoring, will generate new signals based on new price levels)
 ```
 
-### 4. Risk Check Flow (Optional Future Feature)
+### 5. Complete Trading Loop ⭐
 ```
-Order Service (Before Execute)
-  → Risk Manager Service
-  → Approve/Reject
-  → Continue/Abort Order
+┌─────────────────────────────────────────┐
+│ 1. Market Data Service                   │
+│    OKX WebSocket → Redis Pub/Sub         │
+└─────────────┬───────────────────────────┘
+              ↓
+┌─────────────────────────────────────────┐
+│ 2. Strategy Service (Signal Generator)   │
+│    - Monitor price updates               │
+│    - Calculate grid logic                │
+│    - Publish trading signals             │
+└─────────────┬───────────────────────────┘
+              ↓ Redis Pub/Sub
+┌─────────────────────────────────────────┐
+│ 3. Order Service (Validator + Executor)  │
+│    - Receive signal                      │
+│    - Validate feasibility                │
+│    - Calculate quantity                  │
+│    - Execute order                       │
+└─────────────┬───────────────────────────┘
+              ↓
+┌─────────────────────────────────────────┐
+│ 4. Order Execution                       │
+│    Order Service → OKX API               │
+└─────────────┬───────────────────────────┘
+              ↓
+┌─────────────────────────────────────────┐
+│ 5. Fill Monitoring & State Update        │
+│    OKX WebSocket → Order Service         │
+│    Update position & database            │
+└─────────────┬───────────────────────────┘
+              ↓
+          Continuous Loop
 ```
 
 ### Communication Pattern Summary
 
 | Flow | Technology | Pattern | Reason |
 |------|-----------|---------|--------|
-| Market Data → Strategy | Redis Pub/Sub | Broadcast (1-to-many) | Multiple strategies can subscribe |
-| **Strategy → Order** | **gRPC** ⭐ | Request-Response | Need confirmation & error handling |
+| Market Data → Strategy | Redis Pub/Sub | Broadcast (1-to-many) | Strategy monitors prices for signal generation |
+| **Strategy → Order** ⭐ | **Redis Pub/Sub** | **Event Push (signals)** | **Strategy publishes signals, Order subscribes** |
 | Order → OKX | REST + WebSocket | External API | OKX's API design |
-| Order → Database | Direct | Internal | Same service |
+| OKX → Order | Private WebSocket | Push (order fills) | Real-time fill notifications |
+| Order → Database | Direct | Internal | Persist order history |
 
 ---
 
@@ -275,13 +368,12 @@ Order Service (Before Execute)
 ### Go Libraries
 ```
 gorilla/websocket         # WebSocket client
-go-redis/redis            # Redis client
+go-redis/redis            # Redis client (Pub/Sub for signals) ⭐
 lib/pq                    # PostgreSQL driver
-google.golang.org/grpc    # gRPC framework ⭐
-google.golang.org/protobuf # Protocol Buffers ⭐
 gin-gonic/gin             # HTTP framework (optional REST API)
 spf13/viper               # Configuration management
 uber-go/zap               # Structured logging
+encoding/json             # JSON serialization for signals
 ```
 
 ---
@@ -451,26 +543,22 @@ risk_manager:
 ```
 trading-system/
 ├── apps/
-│   ├── market-data-server/        # Go service (WebSocket → Redis)
-│   ├── trading-strategy-server/   # Go service (DDD, gRPC client)
-│   ├── order-service/             # Go service (gRPC server, OKX API)
+│   ├── market-data-server/        # Go service (WebSocket → Redis Pub/Sub)
+│   ├── trading-strategy-server/   # Go service (DDD, Signal Generator)
+│   ├── order-service/             # Go service (Signal Subscriber, OKX API)
 │   ├── risk-manager/              # Go service (future)
 │   └── dashboard/                 # TypeScript (optional, future)
 ├── go-packages/                   # Shared Go packages
 │   ├── logger/                    # Unified logger system
-│   └── websocket/                 # Generic WebSocket client
-├── shared/
-│   └── proto/                     # Protocol Buffers ⭐
-│       └── order/
-│           └── order.proto        # Order service gRPC definition
+│   ├── websocket/                 # Generic WebSocket client
+│   └── signals/                   # Signal types and serialization ⭐
 ├── config/
 │   ├── development.yaml
 │   ├── production.yaml
 │   └── testing.yaml
 ├── scripts/
 │   ├── setup.sh
-│   ├── deploy.sh
-│   └── generate-proto.sh          # Generate Go code from .proto
+│   └── deploy.sh
 ├── docker-compose.yml
 ├── Makefile
 └── CLAUDE.md                      # This file
@@ -498,119 +586,241 @@ trading-system/
 - Atomic changes across services
 - Simplified dependency management
 
-### Q: Redis Pub/Sub vs gRPC for Strategy → Order?
-**A: gRPC** ⭐ **Key Decision**
-- ❌ Redis Pub/Sub: Fire-and-forget, no confirmation, no error handling
-- ✅ gRPC: Request-response, immediate feedback, type-safe, retry support
-- Use Redis Pub/Sub for broadcast (Market Data → Strategy)
-- Use gRPC for request-response (Strategy → Order)
+### Q: Should Strategy push signals or Order pull advice?
+**A: Hybrid Model - Strategy pushes signals, Order validates** ⭐ **Key Design Decision**
+- ✅ Strategy focuses on "should we trade?" (trading logic)
+- ✅ Order focuses on "can we trade?" (risk control + execution)
+- ✅ Clear separation of concerns: Strategy = signal generator, Order = validator + executor
+- ✅ Better decoupling: Strategy doesn't need to know Order Service exists
+- ✅ Scalable: Multiple services can subscribe to same signals
+- ✅ Event-driven: Follows financial system patterns (Signal → Execution)
+
+### Q: Why not Pull Model (Order → Strategy)?
+**A: Less scalable and more coupled**
+- Requires tight coupling between Order and Strategy (gRPC)
+- Order Service needs to actively poll or trigger consultations
+- Less flexible for multiple strategy subscribers
+- More complex to implement multiple strategies
 
 ### Q: Who decides when an order is filled?
 **A: Order Service** ⭐
 - Order Service is the ONLY service with OKX API Key
 - Order Service subscribes to OKX Private WebSocket (orders channel)
-- Order Service monitors fill events and triggers exit orders
-- Strategy Service doesn't need to know if order filled (decoupled)
+- Order Service monitors fill events and updates position state
+- After fill, Strategy Service will generate new signals based on new price levels
 
-### Q: Message Queue needed?
-**A: Not needed for Strategy → Order**
-- gRPC provides better guarantees for this use case
-- Redis Pub/Sub sufficient for Market Data → Strategy (broadcast)
-- Future: Consider message queue for async tasks (notifications, analytics)
+### Q: What about Message Queue?
+**A: Redis Pub/Sub is sufficient**
+- Redis Pub/Sub perfect for Market Data → Strategy (price broadcasts)
+- Redis Pub/Sub perfect for Strategy → Order (signal broadcasts)
+- Lightweight, fast, and built-in to Redis
+- Future: Consider message queue (NATS/Kafka) for analytics, audit logs, notifications
 
 ---
 
-## gRPC Setup Guide
+## Redis Pub/Sub Implementation Guide ⭐ **HYBRID MODEL**
 
-### 1. Define Protocol Buffers
+### 1. Shared Signal Types
 
-Create `shared/proto/order/order.proto`:
-
-```protobuf
-syntax = "proto3";
-
-package order;
-option go_package = "dizzycoder.xyz/trading-system/shared/proto/order";
-
-import "google/protobuf/timestamp.proto";
-
-service OrderService {
-  rpc SubmitSignal(SignalRequest) returns (SignalResponse);
-  rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse);
-  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
-}
-
-message SignalRequest {
-  string inst_id = 1;
-  string action = 2;            // BUY or SELL
-  double price = 3;
-  double quantity = 4;
-  string reason = 5;
-  google.protobuf.Timestamp timestamp = 6;
-}
-
-message SignalResponse {
-  bool success = 1;
-  string order_id = 2;
-  string message = 3;
-  OrderStatus status = 4;
-}
-
-enum OrderStatus {
-  PENDING = 0;
-  ACCEPTED = 1;
-  REJECTED = 2;
-  FILLED = 3;
-  CANCELLED = 4;
-}
-```
-
-### 2. Generate Go Code
-
-```bash
-# Install protoc compiler and Go plugins
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-
-# Generate Go code
-protoc --go_out=. --go_opt=paths=source_relative \
-       --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-       shared/proto/order/order.proto
-```
-
-### 3. Order Service - gRPC Server
+Create `go-packages/signals/types.go`:
 
 ```go
-// apps/order-service/internal/grpc/server.go
-type OrderServer struct {
-    pb.UnimplementedOrderServiceServer
-    orderManager *order.Manager
-    logger       logger.Logger
+package signals
+
+import "time"
+
+// TradingSignal represents a trading signal from Strategy Service
+type TradingSignal struct {
+    InstID    string    `json:"inst_id"`     // Trading pair (e.g., "BTC-USDT-SWAP")
+    Action    Action    `json:"action"`      // BUY/SELL/CLOSE_LONG/CLOSE_SHORT
+    Price     float64   `json:"price"`       // Trigger price
+    Reason    string    `json:"reason"`      // Explanation (e.g., "Grid level #5 triggered")
+    GridLevel int       `json:"grid_level"`  // Which grid level triggered (optional)
+    Timestamp time.Time `json:"timestamp"`   // Signal generation time
 }
 
-func (s *OrderServer) SubmitSignal(ctx context.Context, req *pb.SignalRequest) (*pb.SignalResponse, error) {
-    // Validate, place order, return response
-}
+type Action string
+
+const (
+    ActionHold       Action = "HOLD"
+    ActionBuy        Action = "BUY"
+    ActionSell       Action = "SELL"
+    ActionCloseLong  Action = "CLOSE_LONG"
+    ActionCloseShort Action = "CLOSE_SHORT"
+)
+
+// Redis channel patterns
+const (
+    SignalChannelPattern = "strategy.signals.%s" // %s = instId
+    PriceChannelPattern  = "market.ticker.%s"    // %s = instId
+)
 ```
 
-### 4. Strategy Service - gRPC Client
+### 2. Strategy Service - Signal Publisher
 
 ```go
-// apps/trading-strategy-server/internal/infrastructure/grpc/order_client.go
-type OrderClient struct {
-    client pb.OrderServiceClient
-    conn   *grpc.ClientConn
+// apps/trading-strategy-server/internal/publisher/signal_publisher.go
+type SignalPublisher struct {
+    redis  *redis.Client
+    logger logger.Logger
 }
 
-// Implements application.SignalPublisher interface
-func (c *OrderClient) Publish(ctx context.Context, signal strategy.Signal) error {
-    req := &pb.SignalRequest{
-        InstId: signal.InstID(),
-        Action: string(signal.Action()),
-        // ...
+func (p *SignalPublisher) PublishSignal(ctx context.Context, signal signals.TradingSignal) error {
+    // Serialize signal to JSON
+    data, err := json.Marshal(signal)
+    if err != nil {
+        return fmt.Errorf("failed to marshal signal: %w", err)
     }
-    resp, err := c.client.SubmitSignal(ctx, req)
-    // Handle response
+
+    // Publish to Redis channel
+    channel := fmt.Sprintf(signals.SignalChannelPattern, signal.InstID)
+    if err := p.redis.Publish(ctx, channel, data).Err(); err != nil {
+        return fmt.Errorf("failed to publish signal: %w", err)
+    }
+
+    p.logger.Info("Signal published",
+        "instId", signal.InstID,
+        "action", signal.Action,
+        "price", signal.Price,
+        "reason", signal.Reason,
+    )
+
+    return nil
+}
+```
+
+### 3. Strategy Service - Price Monitoring
+
+```go
+// apps/trading-strategy-server/internal/service/strategy_service.go
+func (s *StrategyService) MonitorPrices(ctx context.Context, instID string) {
+    // Subscribe to price updates
+    channel := fmt.Sprintf(signals.PriceChannelPattern, instID)
+    pubsub := s.redis.Subscribe(ctx, channel)
+    defer pubsub.Close()
+
+    for msg := range pubsub.Channel() {
+        var price float64
+        if err := json.Unmarshal([]byte(msg.Payload), &price); err != nil {
+            s.logger.Error("Failed to parse price", "error", err)
+            continue
+        }
+
+        // Calculate if signal should be generated
+        if signal := s.gridCalculator.CheckTrigger(instID, price); signal != nil {
+            s.publisher.PublishSignal(ctx, *signal)
+        }
+    }
+}
+```
+
+### 4. Order Service - Signal Subscriber
+
+```go
+// apps/order-service/internal/subscriber/signal_subscriber.go
+type SignalSubscriber struct {
+    redis         *redis.Client
+    orderExecutor *executor.OrderExecutor
+    logger        logger.Logger
+}
+
+func (s *SignalSubscriber) Subscribe(ctx context.Context, instID string) {
+    channel := fmt.Sprintf(signals.SignalChannelPattern, instID)
+    pubsub := s.redis.Subscribe(ctx, channel)
+    defer pubsub.Close()
+
+    s.logger.Info("Subscribed to signals", "channel", channel)
+
+    for msg := range pubsub.Channel() {
+        var signal signals.TradingSignal
+        if err := json.Unmarshal([]byte(msg.Payload), &signal); err != nil {
+            s.logger.Error("Failed to parse signal", "error", err)
+            continue
+        }
+
+        s.handleSignal(ctx, signal)
+    }
+}
+
+func (s *SignalSubscriber) handleSignal(ctx context.Context, signal signals.TradingSignal) {
+    // 1. Get current position
+    position, err := s.orderExecutor.GetPosition(signal.InstID)
+    if err != nil {
+        s.logger.Error("Failed to get position", "error", err)
+        return
+    }
+
+    // 2. Validate signal
+    if !s.canExecute(signal, position) {
+        s.logger.Info("Signal validation failed",
+            "instId", signal.InstID,
+            "action", signal.Action,
+            "reason", "insufficient balance or position limit",
+        )
+        return
+    }
+
+    // 3. Calculate quantity
+    quantity := s.calculateQuantity(signal, position)
+
+    // 4. Execute order
+    if err := s.orderExecutor.PlaceOrder(ctx, signal, quantity); err != nil {
+        s.logger.Error("Failed to execute order", "error", err)
+        return
+    }
+
+    s.logger.Info("Order placed",
+        "instId", signal.InstID,
+        "action", signal.Action,
+        "price", signal.Price,
+        "quantity", quantity,
+    )
+}
+```
+
+### 5. Order Service - Validation Logic
+
+```go
+func (s *SignalSubscriber) canExecute(signal signals.TradingSignal, position Position) bool {
+    // Check signal freshness (not stale)
+    if time.Since(signal.Timestamp) > 5*time.Second {
+        return false
+    }
+
+    // Check balance for buy orders
+    if signal.Action == signals.ActionBuy || signal.Action == signals.ActionSell {
+        if position.AvailableBalance < signal.Price*0.01 { // Min order size
+            return false
+        }
+    }
+
+    // Check position size for sell/close orders
+    if signal.Action == signals.ActionSell || signal.Action == signals.ActionCloseLong {
+        if position.Size <= 0 {
+            return false
+        }
+    }
+
+    // Check risk limits
+    if !s.riskManager.CheckLimits(position) {
+        return false
+    }
+
+    return true
+}
+
+func (s *SignalSubscriber) calculateQuantity(signal signals.TradingSignal, position Position) float64 {
+    // Grid-based quantity calculation
+    baseQuantity := 0.01 // Base order size
+
+    // Apply position sizing based on balance
+    maxQuantity := position.AvailableBalance * 0.1 / signal.Price
+
+    if baseQuantity > maxQuantity {
+        return maxQuantity
+    }
+
+    return baseQuantity
 }
 ```
 
@@ -623,18 +833,48 @@ func (c *OrderClient) Publish(ctx context.Context, signal strategy.Signal) error
 - Trading Strategy Service - Domain Layer (DDD)
 - Trading Strategy Service - Application Layer (DDD)
 
-### 🔄 In Progress
-- Trading Strategy Service - Infrastructure Layer (Redis subscriber, gRPC client)
+### 🔄 In Progress - Architecture Redesign ⭐
+- **Hybrid Model**: Strategy publishes signals, Order validates and executes
+- Replacing gRPC with Redis Pub/Sub for Strategy → Order communication
+- Refactoring Strategy Service to be signal generator
+- Refactoring Order Service to be signal subscriber + validator
 
 ### 📋 Next Steps
-1. Define gRPC Protocol Buffers (`shared/proto/order/order.proto`)
-2. Generate Go code from .proto files
-3. Implement Order Service (gRPC server, OKX API integration)
-4. Complete Strategy Service infrastructure (gRPC client)
-5. Test end-to-end flow (Market Data → Strategy → Order)
-6. Implement Order fill monitoring (OKX Private WebSocket)
+1. **Create shared signal types** (`go-packages/signals/`)
+   - Define `TradingSignal` struct
+   - Define action types (BUY/SELL/CLOSE_LONG/CLOSE_SHORT)
+   - Define Redis channel patterns
+
+2. **Implement Strategy Service as Signal Publisher**
+   - Subscribe to Market Data price updates
+   - Calculate grid logic and generate signals
+   - Publish signals to Redis Pub/Sub
+   - Remove any Order Service dependencies
+
+3. **Implement Order Service as Signal Subscriber**
+   - Subscribe to Strategy signals via Redis Pub/Sub
+   - Implement signal validation logic
+   - Calculate order quantities based on position state
+   - Execute orders via OKX API
+
+4. **Implement Order Service position management**
+   - Track current positions from OKX
+   - Calculate cost basis and P&L
+   - Manage order lifecycle
+   - Maintain position state in memory + database
+
+5. **Test end-to-end flow**
+   - Market Data → Strategy (price updates)
+   - Strategy → Redis (signal publishing)
+   - Redis → Order Service (signal subscription)
+   - Order Service → OKX (order execution)
+
+6. **Implement Order fill monitoring**
+   - OKX Private WebSocket subscription
+   - Update position state on fills
+   - Persist trade history to database
 
 ---
 
 *Document created: 2025-10-14*
-*Last updated: 2025-10-14*
+*Last updated: 2025-10-16* ⭐ **Major architecture revision: Hybrid Model - Strategy publishes signals, Order validates and executes**

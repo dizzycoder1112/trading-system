@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"dizzycode.xyz/logger"
-	"dizzycoder.xyz/trading-strategy-server/internal/domain/strategy"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy"
 )
 
 // SignalPublisher 信號發布器介面（端口）
