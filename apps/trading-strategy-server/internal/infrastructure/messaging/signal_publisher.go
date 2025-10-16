@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"dizzycode.xyz/logger"
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 )
 
 // RedisSignalPublisher implements the SignalPublisher port from application layer
@@ -25,7 +25,7 @@ func NewRedisSignalPublisher(client *RedisClient, log logger.Logger) *RedisSigna
 
 // Publish implements application.SignalPublisher interface
 // Publishes signal to Redis Pub/Sub channel: strategy.signals.{instId}
-func (p *RedisSignalPublisher) Publish(ctx context.Context, signal strategy.Signal) error {
+func (p *RedisSignalPublisher) Publish(ctx context.Context, signal value_objects.Signal) error {
 	channel := fmt.Sprintf("strategy.signals.%s", signal.InstID())
 
 	// Signal already implements MarshalJSON, serialize directly

@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"dizzycode.xyz/trading-strategy-server/internal/application"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies/grid"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/config"
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/logger"
+	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/messaging"
 )
 
 func main() {
@@ -22,26 +27,84 @@ func main() {
 		"strategy":    cfg.Strategy.Type,
 	})
 
-	// 3. TODO: 創建 Redis 客戶端
-	// redisClient, err := redis.NewClient(...)
+	// 3. 創建 Redis 客戶端
+	redisClient, err := messaging.NewRedisClient(
+		cfg.Redis.Addr,
+		cfg.Redis.Password,
+		cfg.Redis.DB,
+		log,
+	)
+	if err != nil {
+		log.Error("Failed to connect to Redis", map[string]any{"error": err})
+		os.Exit(1)
+	}
+	defer redisClient.Close()
 
-	// 4. TODO: 創建 Redis 訂閱器
-	// subscriber := redis.NewSubscriber(...)
+	log.Info("Connected to Redis", map[string]any{"addr": cfg.Redis.Addr})
 
-	// 5. TODO: 創建策略引擎
-	// strategyEngine := strategy.NewEngine(...)
+	// 4. 創建基礎設施層 - Signal 發布器
+	signalPublisher := messaging.NewRedisSignalPublisher(redisClient, log)
 
-	// 6. TODO: 啟動策略引擎
-	// strategyEngine.Start()
+	// 5. 創建領域層 - GridAggregate (one per instrument)
+	// For now, handle first instrument only
+	if len(cfg.Strategy.Instruments) == 0 {
+		log.Error("No instruments configured", map[string]any{})
+		os.Exit(1)
+	}
+
+	instID := cfg.Strategy.Instruments[0]
+	grid, err := grid.NewGridAggregate(
+		instID,
+		cfg.Strategy.Grid.PositionSize,
+		cfg.Strategy.Grid.TakeProfitMin,
+		cfg.Strategy.Grid.TakeProfitMax,
+	)
+	if err != nil {
+		log.Error("Failed to create grid aggregate", map[string]any{"error": err})
+		os.Exit(1)
+	}
+
+	log.Info("Grid aggregate created", map[string]any{
+		"instId":        instID,
+		"positionSize":  cfg.Strategy.Grid.PositionSize,
+		"takeProfitMin": cfg.Strategy.Grid.TakeProfitMin,
+		"takeProfitMax": cfg.Strategy.Grid.TakeProfitMax,
+	})
+
+	// 6. 創建應用層 - StrategyService
+	strategyService := application.NewStrategyService(grid, signalPublisher, log)
+
+	// 7. 創建基礎設施層 - Candle 訂閱器
+	candleSubscriber := messaging.NewCandleSubscriber(redisClient, log)
+
+	// 8. 啟動訂閱循環
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := candleSubscriber.Subscribe(
+			ctx,
+			instID,
+			"5m", // 5-minute candles as per strategy document
+			func(candle value_objects.Candle) error {
+				// Call application layer use case
+				return strategyService.HandleCandleUpdate(ctx, candle)
+			},
+		); err != nil && err != context.Canceled {
+			log.Error("Candle subscription failed", map[string]any{"error": err})
+		}
+	}()
 
 	log.Info("Trading Strategy Server started successfully", map[string]any{
 		"instruments": cfg.Strategy.Instruments,
+		"listening":   "market.candle.5m." + instID,
 	})
 
-	// 7. 等待退出信號
+	// 9. 等待退出信號
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	log.Info("Shutting down Trading Strategy Server...")
+	cancel() // Cancel context to stop subscriptions
 }

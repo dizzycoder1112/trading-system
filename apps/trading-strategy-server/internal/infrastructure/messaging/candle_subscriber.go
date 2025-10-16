@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"dizzycode.xyz/logger"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 )
 
 // CandleSubscriber subscribes to candle data from Redis Pub/Sub
@@ -30,7 +32,7 @@ func (s *CandleSubscriber) Subscribe(
 	ctx context.Context,
 	instID string,
 	bar string,
-	onCandle func(price float64) error,
+	onCandle func(candle value_objects.Candle) error,
 ) error {
 	channel := fmt.Sprintf("market.candle.%s.%s", bar, instID)
 
@@ -73,25 +75,63 @@ func (s *CandleSubscriber) Subscribe(
 	}
 }
 
-// handleCandleMessage parses candle JSON and extracts price
-func (s *CandleSubscriber) handleCandleMessage(payload string, onCandle func(price float64) error) error {
-	var candle struct {
-		Close string `json:"close"`
+// handleCandleMessage parses candle JSON and creates Candle value object
+func (s *CandleSubscriber) handleCandleMessage(payload string, onCandle func(candle value_objects.Candle) error) error {
+	var raw struct {
+		Open      string `json:"open"`
+		High      string `json:"high"`
+		Low       string `json:"low"`
+		Close     string `json:"close"`
+		Timestamp string `json:"ts"`
 	}
 
-	if err := json.Unmarshal([]byte(payload), &candle); err != nil {
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return fmt.Errorf("failed to parse candle JSON: %w", err)
 	}
 
-	price, err := strconv.ParseFloat(candle.Close, 64)
+	// Parse prices
+	open, err := strconv.ParseFloat(raw.Open, 64)
 	if err != nil {
-		return fmt.Errorf("invalid price value '%s': %w", candle.Close, err)
+		return fmt.Errorf("invalid open price '%s': %w", raw.Open, err)
 	}
 
-	s.logger.Debug("Received candle", map[string]any{"price": price})
+	high, err := strconv.ParseFloat(raw.High, 64)
+	if err != nil {
+		return fmt.Errorf("invalid high price '%s': %w", raw.High, err)
+	}
+
+	low, err := strconv.ParseFloat(raw.Low, 64)
+	if err != nil {
+		return fmt.Errorf("invalid low price '%s': %w", raw.Low, err)
+	}
+
+	close, err := strconv.ParseFloat(raw.Close, 64)
+	if err != nil {
+		return fmt.Errorf("invalid close price '%s': %w", raw.Close, err)
+	}
+
+	// Parse timestamp (milliseconds since epoch)
+	tsMs, err := strconv.ParseInt(raw.Timestamp, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp '%s': %w", raw.Timestamp, err)
+	}
+	timestamp := time.Unix(0, tsMs*int64(time.Millisecond))
+
+	// Create Candle value object
+	candle, err := value_objects.NewCandle(open, high, low, close, timestamp)
+	if err != nil {
+		return fmt.Errorf("failed to create candle: %w", err)
+	}
+
+	s.logger.Debug("Received candle", map[string]any{
+		"open":  open,
+		"high":  high,
+		"low":   low,
+		"close": close,
+	})
 
 	// Invoke callback
-	if err := onCandle(price); err != nil {
+	if err := onCandle(candle); err != nil {
 		return fmt.Errorf("candle handler failed: %w", err)
 	}
 
