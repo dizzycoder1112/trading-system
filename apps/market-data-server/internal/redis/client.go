@@ -9,12 +9,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Client Redis 客戶端封裝
-type Client struct {
-	rdb    *redis.Client
-	logger logger.Logger
-}
-
 // Config Redis 配置
 type Config struct {
 	Addr     string
@@ -24,8 +18,13 @@ type Config struct {
 	Logger   logger.Logger
 }
 
-// NewClient 創建新的 Redis 客戶端
-func NewClient(cfg Config) (*Client, error) {
+// NewClient 創建新的 Redis 客戶端（直接返回 *redis.Client）
+//
+// 不使用 wrapper，直接返回 redis.Client：
+// - redis.Client 已經提供了連接池、重試等功能
+// - 不需要額外的抽象層（storage.RedisStorage 已經是封装层）
+// - 避免暴露內部實現的問題
+func NewClient(cfg Config) (*redis.Client, error) {
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -46,23 +45,5 @@ func NewClient(cfg Config) (*Client, error) {
 		"db":   cfg.DB,
 	})
 
-	return &Client{
-		rdb:    rdb,
-		logger: cfg.Logger,
-	}, nil
-}
-
-// Close 關閉 Redis 連接
-func (c *Client) Close() error {
-	return c.rdb.Close()
-}
-
-// Ping 測試連接
-func (c *Client) Ping(ctx context.Context) error {
-	return c.rdb.Ping(ctx).Err()
-}
-
-// GetClient 獲取底層 Redis 客戶端（供其他模組使用）
-func (c *Client) GetClient() *redis.Client {
-	return c.rdb
+	return rdb, nil
 }
