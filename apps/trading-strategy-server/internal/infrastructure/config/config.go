@@ -18,18 +18,17 @@ type Config struct {
 
 // StrategyConfig 策略配置
 type StrategyConfig struct {
-	Instruments  []string   // 要監控的交易對列表，例如: BTC-USDT,ETH-USDT
-	Type         string     // 策略類型: grid, dca, etc.
-	Grid         GridConfig // 網格策略參數
+	Instruments []string   // 要監控的交易對列表，例如: BTC-USDT,ETH-USDT
+	Type        string     // 策略類型: grid, dca, etc.
+	Grid        GridConfig // 網格策略參數
 }
 
 // GridConfig 網格策略配置
 type GridConfig struct {
-	PositionSize   float64 // 單次開倉大小（名義，美元）
-	TakeProfitMin  float64 // 最小停利百分比
-	TakeProfitMax  float64 // 最大停利百分比
-	MaxPositions   int     // 最大持倉數量
-	MaxNotional    float64 // 最大持倉名義價值（美元）
+	TakeProfitMin float64 // 最小停利百分比
+	TakeProfitMax float64 // 最大停利百分比
+	MaxPositions  int     // 最大持倉數量
+	MaxNotional   float64 // 最大持倉名義價值（美元）
 }
 
 type RedisConfig struct {
@@ -60,11 +59,10 @@ func Load() *Config {
 			Instruments: instList,
 			Type:        getEnvOrDefault("STRATEGY_TYPE", "grid"),
 			Grid: GridConfig{
-				PositionSize:   getEnvFloatOrDefault("GRID_POSITION_SIZE", 200.0),
-				TakeProfitMin:  getEnvFloatOrDefault("GRID_TP_MIN", 0.001),  // 0.1%
-				TakeProfitMax:  getEnvFloatOrDefault("GRID_TP_MAX", 0.003),  // 0.3%
-				MaxPositions:   getEnvIntOrDefault("GRID_MAX_POSITIONS", 30),
-				MaxNotional:    getEnvFloatOrDefault("GRID_MAX_NOTIONAL", 3000.0),
+				TakeProfitMin: getEnvFloatOrDefault("GRID_TP_MIN", 0.001), // 0.1%
+				TakeProfitMax: getEnvFloatOrDefault("GRID_TP_MAX", 0.003), // 0.3%
+				MaxPositions:  getEnvIntOrDefault("GRID_MAX_POSITIONS", 30),
+				MaxNotional:   getEnvFloatOrDefault("GRID_MAX_NOTIONAL", 3000.0),
 			},
 		},
 		Redis: RedisConfig{

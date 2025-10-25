@@ -2,12 +2,13 @@
 
 ## 服務概述
 
-Trading Strategy Server 是交易系統的**策略引擎**,負責:
-- 從 Redis 訂閱即時市場數據
-- 計算網格交易策略
-- 生成交易信號（BUY/SELL）
-- 管理網格狀態和持倉
-- **不執行實際交易**（交易由 Order Manager 負責）
+Trading Strategy Server 是交易系統的**策略計算顧問**，負責：
+- **被動響應 Order Service 的開倉諮詢請求** ⭐ 核心定位
+- 從 Redis 讀取最新市場數據（Candle/Price）
+- 計算網格策略開倉點位（基於上一根 K 線的 MidLow）
+- 提供開倉建議（價格、倉位大小、停利百分比）
+- **無狀態設計**：不知道倉位，不管理持倉，不執行交易
+- **單一職責**：只負責策略計算，風險控制由 Order Service 負責
 
 ## 架構設計
 
@@ -92,34 +93,113 @@ trading-strategy-server/
 
 ---
 
-## 系統職責
+## 系統職責 ⭐ 被動諮詢模式
+
+### **為什麼採用被動模式？**
+
+**核心問題**：倉位狀態只有 Order Service 知道
+
+```
+場景：Order Service 持有 API Key
+- 當前倉位：3 筆多單（200 + 200 + 200 美金）
+- 平均成本：4175
+- 1 分鐘前剛開倉
+
+問題：
+1. 如果 Strategy Service 主動推送開倉信號 →
+   Order Service 需要過濾掉（重複開倉、倉位限制、冷卻期）
+
+2. 如果 Strategy Service 不知道倉位 →
+   會持續推送無用信號，浪費資源
+
+解決方案：
+✅ Order Service 決定何時詢問（風險控制在源頭）
+✅ Strategy Service 只負責計算（無狀態、單一職責）
+```
 
 ### **Trading Strategy Server 的職責** ✅
 
-1. **訂閱市場數據**
-   - 從 Redis 訂閱 `market:candle:1m:ETH-USDT`
-   - 解析 Candle 數據
+#### 1. **被動響應開倉諮詢** ⭐ 核心功能
+- 接收 Order Service 的請求：`GetOpenAdvice(instID, currentPrice)`
+- 從 Redis 讀取最新 Candle：`candle.latest.5m.BTC-USDT`
+- 計算開倉點位：上一根 K 線的 MidLow = `(low + close) / 2`
+- 判斷是否應該開倉：`currentPrice <= MidLow`
+- 返回建議：`OpenAdvice{shouldOpen, price, positionSize, takeProfit, reason}`
 
-2. **計算網格策略**
-   - 初始化網格線（上界、下界、網格數）
-   - 監聽價格變化
-   - 判斷觸發條件（價格穿越網格線）
+#### 2. **無狀態設計**
+- ❌ 不記錄 `lastCandle`（每次請求時從 Redis 讀取）
+- ❌ 不知道當前倉位（Order Service 才知道）
+- ❌ 不追蹤開倉歷史（Order Service 負責）
+- ✅ 純計算服務，可橫向擴展
 
-3. **生成交易信號**
-   - 向上穿越 → SELL 信號
-   - 向下穿越 → BUY 信號
-   - 輸出: `Signal{Action, InstID, Price, Quantity, Time}`
+#### 3. **策略計算邏輯**
+```go
+// 網格策略：基於上一根 K 線的 MidLow 開倉
+func GetOpenAdvice(currentPrice, lastCandle) OpenAdvice {
+    midLow := (lastCandle.Low + lastCandle.Close) / 2
 
-4. **管理網格狀態**
-   - 記錄當前持倉
-   - 追蹤已觸發/未觸發的網格線
-   - 計算 P&L
+    if currentPrice <= midLow {
+        return OpenAdvice{
+            ShouldOpen: true,
+            Price: midLow,
+            PositionSize: 200,  // 配置的固定倉位
+            TakeProfit: 0.015,  // 1.5%
+            Reason: "hit_mid_low",
+        }
+    }
+
+    return OpenAdvice{ShouldOpen: false, Reason: "price_above_mid_low"}
+}
+```
 
 ### **Trading Strategy Server 不做的事** ❌
 
-- ❌ 不執行實際交易（由 Order Manager 負責）
+- ❌ 不主動訂閱市場數據（改為被動讀取）
+- ❌ 不推送交易信號（改為響應請求）
+- ❌ 不知道倉位狀態（Order Service 獨有）
+- ❌ 不執行風險控制（倉位限制、冷卻期由 Order Service 負責）
+- ❌ 不執行實際交易（由 Order Service 負責）
 - ❌ 不直接調用交易所 API
 - ❌ 不管理訂單狀態
+
+### **Order Service 的職責** ⭐ 決策中心
+
+#### 1. **風險控制（開倉前檢查）**
+```go
+// Order Service 每次價格變化時檢查
+func OnPriceUpdate(price float64) {
+    // 1. 風險檢查
+    if currentPositions >= maxPositions { return }      // 倉位限制
+    if balance < minBalance { return }                  // 保證金不足
+    if time.Since(lastOpenTime) < cooldown { return }   // 冷卻期
+
+    // 2. 通過風險檢查，詢問策略
+    advice := strategyService.GetOpenAdvice(instID, price)
+
+    // 3. 執行開倉
+    if advice.ShouldOpen {
+        placeOrder(advice.Price, advice.PositionSize)
+    }
+}
+```
+
+#### 2. **動態打平價格管理** ⭐ 關鍵功能
+```go
+// 每次倉位變化時重新計算
+func OnPositionChange() {
+    // 計算平均成本
+    avgCost := calculateAverageCost(positions)
+
+    // 計算打平價格（含手續費 0.1%）
+    breakEvenPrice := avgCost * (1 + 0.001)
+
+    // 撤銷舊出場單
+    cancelOrder(oldExitOrderID)
+
+    // 下新出場單
+    placeExitOrder(breakEvenPrice, totalPositionSize)
+}
+```
 
 ---
 
@@ -224,11 +304,398 @@ REDIS_ADDR=db.redis.orb.local:6379
 
 ---
 
-## 📋 待完成的功能
+## 📋 當前任務：重構為被動諮詢模式 ⭐ 優先級：最高
 
-### Phase 2: 基礎設施層實作（優先級：高）⭐ 下一步
+### **重構背景**
 
-**說明**：領域層和應用層已完成，現在需要實作基礎設施層的適配器（Adapters）
+**當前架構（主動模式）**：
+```
+Market Data Service → Redis Pub/Sub → Strategy Service (訂閱) → 推送信號
+```
+問題：Strategy Service 不知道倉位，會推送大量無用信號
+
+**目標架構（被動模式）**：
+```
+Order Service (請求) → Strategy Service (計算) → 返回建議
+                           ↓ 讀取
+                         Redis (市場數據緩存)
+```
+優勢：Order Service 控制風險，Strategy Service 只負責計算
+
+---
+
+### **重構計劃**
+
+#### **Phase 1: Infrastructure 層 - Market Data Reader** ⭐ Step 1
+
+**新增檔案**: `internal/infrastructure/messaging/market_data_reader.go`
+
+**職責**: 從 Redis 讀取最新的市場數據（替代 Pub/Sub 訂閱）
+
+**實作內容**:
+```go
+package messaging
+
+type MarketDataReader struct {
+    client *RedisClient
+    logger logger.Logger
+}
+
+// GetLatestCandle 從 Redis 讀取最新 Candle
+// Key: candle.latest.{bar}.{instId}
+func (r *MarketDataReader) GetLatestCandle(ctx context.Context, instID string, bar string) (*value_objects.Candle, error) {
+    key := fmt.Sprintf("candle.latest.%s.%s", bar, instID)
+
+    val, err := r.client.Client().Get(ctx, key).Result()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get candle: %w", err)
+    }
+
+    // Parse JSON → Candle value object
+    var candleData struct {
+        InstID  string `json:"instId"`
+        Bar     string `json:"bar"`
+        Open    string `json:"open"`
+        High    string `json:"high"`
+        Low     string `json:"low"`
+        Close   string `json:"close"`
+        Confirm string `json:"confirm"`
+    }
+
+    json.Unmarshal([]byte(val), &candleData)
+
+    return value_objects.NewCandleFromStrings(
+        candleData.InstID,
+        candleData.Bar,
+        candleData.Open,
+        candleData.High,
+        candleData.Low,
+        candleData.Close,
+        candleData.Confirm,
+    )
+}
+
+// GetLatestPrice 從 Redis 讀取最新價格（用於模擬 Order Service）
+// Key: price.latest.{instId}
+func (r *MarketDataReader) GetLatestPrice(ctx context.Context, instID string) (float64, error) {
+    key := fmt.Sprintf("price.latest.%s", instID)
+
+    val, err := r.client.Client().Get(ctx, key).Result()
+    if err != nil {
+        return 0, fmt.Errorf("failed to get price: %w", err)
+    }
+
+    var priceData struct {
+        Last string `json:"last"`
+    }
+
+    json.Unmarshal([]byte(val), &priceData)
+
+    price, err := value_objects.NewPriceFromString(priceData.Last)
+    return price.Value(), err
+}
+```
+
+**任務清單**:
+- [ ] 創建 `market_data_reader.go`
+- [ ] 實作 `GetLatestCandle()` 方法
+- [ ] 實作 `GetLatestPrice()` 方法（用於模擬）
+- [ ] 添加錯誤處理
+
+---
+
+#### **Phase 2: Domain 層 - 重構 GridAggregate** ⭐ Step 2
+
+**修改檔案**: `internal/domain/strategy/strategies/grid/grid.go`
+
+**關鍵變化**:
+1. 移除 `lastCandle` 狀態（無狀態設計）
+2. 新增 `OpenAdvice` 結構
+3. 新增 `GetOpenAdvice()` 方法（替代 `ProcessCandle()`）
+
+**實作內容**:
+```go
+package grid
+
+// OpenAdvice 開倉建議（領域值對象）
+type OpenAdvice struct {
+    ShouldOpen   bool    // 是否應該開倉
+    Price        float64 // 建議開倉價格
+    PositionSize float64 // 建議倉位大小
+    TakeProfit   float64 // 建議停利百分比
+    Reason       string  // 原因
+}
+
+// GridAggregate 網格聚合根（無狀態設計）⭐
+type GridAggregate struct {
+    instID        string
+    positionSize  float64
+    takeProfitMin float64
+    takeProfitMax float64
+    calculator    *GridCalculator
+    // ❌ 移除 lastCandle（改為參數傳入）
+}
+
+// GetOpenAdvice 獲取開倉建議（被動諮詢方法）⭐
+// 參數：
+//   currentPrice: 當前價格（Order Service 提供）
+//   lastCandle: 上一根 K 線（從 Redis 讀取）
+func (g *GridAggregate) GetOpenAdvice(
+    currentPrice value_objects.Price,
+    lastCandle value_objects.Candle,
+) OpenAdvice {
+    // 計算開倉位置：MidLow
+    midLow := lastCandle.MidLow()
+
+    // 判斷是否觸及開倉點位
+    if currentPrice.IsBelowOrEqual(midLow) {
+        takeProfit := (g.takeProfitMin + g.takeProfitMax) / 2.0
+
+        return OpenAdvice{
+            ShouldOpen:   true,
+            Price:        midLow.Value(),
+            PositionSize: g.positionSize,
+            TakeProfit:   takeProfit,
+            Reason:       fmt.Sprintf("hit_mid_low_%.2f", midLow.Value()),
+        }
+    }
+
+    // 不應該開倉
+    return OpenAdvice{
+        ShouldOpen: false,
+        Reason:     fmt.Sprintf("price_%.2f_above_mid_low_%.2f", currentPrice.Value(), midLow.Value()),
+    }
+}
+```
+
+**任務清單**:
+- [ ] 創建 `OpenAdvice` 結構
+- [ ] 移除 `lastCandle` 字段
+- [ ] 實作 `GetOpenAdvice()` 方法
+- [ ] 移除舊的 `ProcessCandle()` 方法
+
+---
+
+#### **Phase 3: Application 層 - 新增 GetOpenAdvice 用例** ⭐ Step 3
+
+**修改檔案**: `internal/application/strategy_service.go`
+
+**關鍵變化**:
+1. 新增 `MarketDataReader` 介面（端口）
+2. 新增 `GetOpenAdvice()` 用例
+3. 移除舊的 `HandleCandleUpdate()` 用例
+
+**實作內容**:
+```go
+package application
+
+// MarketDataReader 介面（端口）
+type MarketDataReader interface {
+    GetLatestCandle(ctx context.Context, instID string, bar string) (*value_objects.Candle, error)
+}
+
+// StrategyService 策略應用服務
+type StrategyService struct {
+    grid       *grid.GridAggregate
+    dataReader MarketDataReader  // ⭐ 新增
+    logger     logger.Logger
+}
+
+func NewStrategyService(
+    grid *grid.GridAggregate,
+    dataReader MarketDataReader,  // ⭐ 新增參數
+    logger logger.Logger,
+) *StrategyService {
+    return &StrategyService{
+        grid:       grid,
+        dataReader: dataReader,
+        logger:     logger,
+    }
+}
+
+// GetOpenAdvice 獲取開倉建議（被動諮詢用例）⭐
+func (s *StrategyService) GetOpenAdvice(
+    ctx context.Context,
+    instID string,
+    currentPrice float64,
+) (*grid.OpenAdvice, error) {
+    // 1. 從 Redis 讀取最新 Candle
+    lastCandle, err := s.dataReader.GetLatestCandle(ctx, instID, "5m")
+    if err != nil {
+        s.logger.Error("Failed to get latest candle", map[string]any{"error": err})
+        return nil, err
+    }
+
+    s.logger.Debug("Retrieved latest candle", map[string]any{
+        "close": lastCandle.Close().Value(),
+        "low":   lastCandle.Low().Value(),
+    })
+
+    // 2. 創建價格值對象
+    price, err := value_objects.NewPrice(currentPrice)
+    if err != nil {
+        return nil, err
+    }
+
+    // 3. 調用領域邏輯
+    advice := s.grid.GetOpenAdvice(price, *lastCandle)
+
+    // 4. 記錄日誌
+    s.logger.Info("Open advice generated", map[string]any{
+        "shouldOpen":   advice.ShouldOpen,
+        "price":        advice.Price,
+        "positionSize": advice.PositionSize,
+        "reason":       advice.Reason,
+    })
+
+    return &advice, nil
+}
+```
+
+**任務清單**:
+- [ ] 新增 `MarketDataReader` 介面
+- [ ] 更新 `NewStrategyService()` 接受 `dataReader`
+- [ ] 實作 `GetOpenAdvice()` 用例
+- [ ] 移除舊的 `HandleCandleUpdate()` 方法
+- [ ] 移除 `SignalPublisher` 相關代碼
+
+---
+
+#### **Phase 4: Main.go - 模擬 Order Service 請求** ⭐ Step 4
+
+**修改檔案**: `cmd/main.go`
+
+**關鍵變化**:
+1. 創建 `MarketDataReader`
+2. 移除 `CandleSubscriber`
+3. 移除 `SignalPublisher`
+4. 使用 `while` 循環模擬 Order Service 定時詢問
+
+**實作內容**:
+```go
+func main() {
+    cfg := config.Load()
+    log := logger.Must(cfg)
+
+    // 1. 創建 Redis 客戶端
+    redisClient, err := messaging.NewRedisClient(
+        cfg.Redis.Addr,
+        cfg.Redis.Password,
+        cfg.Redis.DB,
+        log,
+    )
+    if err != nil {
+        log.Error("Failed to connect to Redis", map[string]any{"error": err})
+        os.Exit(1)
+    }
+    defer redisClient.Close()
+
+    // 2. 創建 Market Data Reader ⭐
+    dataReader := messaging.NewMarketDataReader(redisClient, log)
+
+    // 3. 創建領域層 - GridAggregate
+    instID := cfg.Strategy.Instruments[0]
+    grid, err := grid.NewGridAggregate(
+        instID,
+        cfg.Strategy.Grid.PositionSize,
+        cfg.Strategy.Grid.TakeProfitMin,
+        cfg.Strategy.Grid.TakeProfitMax,
+    )
+    if err != nil {
+        log.Error("Failed to create grid", map[string]any{"error": err})
+        os.Exit(1)
+    }
+
+    // 4. 創建應用層 - StrategyService ⭐
+    strategyService := application.NewStrategyService(grid, dataReader, log)
+
+    log.Info("Trading Strategy Server started successfully")
+
+    // 5. 模擬 Order Service 請求循環 ⭐
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    go func() {
+        ticker := time.NewTicker(5 * time.Second)  // 每 5 秒詢問一次
+        defer ticker.Stop()
+
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-ticker.C:
+                // 模擬：從 Redis 讀取當前價格
+                currentPrice, err := dataReader.GetLatestPrice(ctx, instID)
+                if err != nil {
+                    log.Warn("Failed to get current price", map[string]any{"error": err})
+                    continue
+                }
+
+                log.Info("Order Service simulation: Querying open advice", map[string]any{
+                    "currentPrice": currentPrice,
+                })
+
+                // 調用策略服務
+                advice, err := strategyService.GetOpenAdvice(ctx, instID, currentPrice)
+                if err != nil {
+                    log.Error("Failed to get open advice", map[string]any{"error": err})
+                    continue
+                }
+
+                // 輸出建議
+                if advice.ShouldOpen {
+                    log.Info("✅ Should open position", map[string]any{
+                        "price":        advice.Price,
+                        "positionSize": advice.PositionSize,
+                        "takeProfit":   advice.TakeProfit,
+                        "reason":       advice.Reason,
+                    })
+                } else {
+                    log.Debug("❌ Should not open", map[string]any{
+                        "reason": advice.Reason,
+                    })
+                }
+            }
+        }
+    }()
+
+    // 6. 等待退出信號
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+
+    log.Info("Shutting down...")
+    cancel()
+}
+```
+
+**任務清單**:
+- [ ] 創建 `MarketDataReader` 實例
+- [ ] 更新 `NewStrategyService()` 傳入 `dataReader`
+- [ ] 移除 `CandleSubscriber` 創建代碼
+- [ ] 移除 `SignalPublisher` 創建代碼
+- [ ] 實作 `while` 循環模擬 Order Service
+- [ ] 測試完整流程
+
+---
+
+### **重構任務總覽**
+
+| Phase | 任務 | 檔案 | 狀態 |
+|-------|------|------|------|
+| 1 | 創建 Market Data Reader | `messaging/market_data_reader.go` | ⏳ 待完成 |
+| 2 | 重構 GridAggregate | `grid/grid.go` | ⏳ 待完成 |
+| 3 | 新增 GetOpenAdvice 用例 | `application/strategy_service.go` | ⏳ 待完成 |
+| 4 | 更新 Main.go 模擬請求 | `cmd/main.go` | ⏳ 待完成 |
+| 5 | 測試完整流程 | - | ⏳ 待完成 |
+
+---
+
+## 📋 待完成的功能（未來）
+
+### Phase 5: gRPC 整合（優先級：中）
+
+**說明**：目前使用 while 循環模擬 Order Service，未來改為 gRPC
 
 **Note**: Redis channel 使用 `.` 作為分隔符（例如：`market.ticker.ETH-USDT`）
 
@@ -465,35 +932,129 @@ func TestGridAggregate_ProcessPriceUpdate(t *testing.T) {
 
 ---
 
-## 🎯 數據流
+## 🎯 數據流（被動諮詢模式）⭐
+
+### **完整開倉流程**
 
 ```
+========== 市場數據緩存 ==========
 Market Data Service
-    ↓ 發布 Candle 數據
-Redis Pub/Sub (market.candle.1m.ETH-USDT)
-    ↓ 訂閱 (CandleSubscriber - Infrastructure)
-Trading Strategy Server
-    ↓ 提取價格
-Application Layer (StrategyService)
-    ↓ 調用領域邏輯
-Domain Layer (GridAggregate.ProcessPriceUpdate)
-    ↓ 生成信號
-Application Layer
-    ↓ 通過端口發布
-Infrastructure Layer (RedisSignalPublisher)
-    ↓ 發布信號
-Redis Pub/Sub (strategy.signals.ETH-USDT)
-    ↓ 訂閱
-Order Service (未實作)
-    ↓ 驗證並執行交易
-OKX API
+    ↓ 訂閱 OKX WebSocket
+    ↓ 接收 Candle 數據
+    ↓ 緩存到 Redis
+Redis SET: candle.latest.5m.BTC-USDT-SWAP
+Redis SET: price.latest.BTC-USDT-SWAP
+
+========== Order Service 決策循環 ==========
+Order Service (訂閱 price.latest 或定時輪詢)
+    ↓ 收到新價格：$4140
+    ↓
+    ↓ 【風險檢查】
+    ↓   - 當前倉位：600 / 5000 ✅
+    ↓   - 保證金充足：5000 > 1000 ✅
+    ↓   - 冷卻期：2 分鐘（limit: 1 分鐘）✅
+    ↓   - 決定：可以開倉
+    ↓
+    ↓ 【請求開倉建議】
+    ↓ Request: GetOpenAdvice(instID="BTC-USDT-SWAP", currentPrice=4140)
+
+========== Strategy Service 計算 ==========
+Strategy Service
+    ↓ 接收請求
+    ↓
+    ↓ Application Layer (StrategyService.GetOpenAdvice)
+    ↓   1. 從 Redis 讀取最新 Candle
+Redis GET: candle.latest.5m.BTC-USDT-SWAP
+    ↓   → lastCandle: {low: 4100, close: 4200}
+    ↓
+    ↓   2. 創建 Price 值對象
+    ↓   → currentPrice: Price(4140)
+    ↓
+    ↓   3. 調用領域邏輯
+    ↓
+    ↓ Domain Layer (GridAggregate.GetOpenAdvice)
+    ↓   1. 計算 MidLow：(4100 + 4200) / 2 = 4150
+    ↓   2. 判斷：4140 <= 4150? Yes ✅
+    ↓   3. 返回建議：OpenAdvice{
+    ↓        ShouldOpen: true,
+    ↓        Price: 4150,
+    ↓        PositionSize: 200,
+    ↓        TakeProfit: 0.015,
+    ↓        Reason: "hit_mid_low_4150"
+    ↓      }
+    ↓
+    ↓ Application Layer
+    ↓   4. 記錄日誌
+    ↓   5. 返回建議給 Order Service
+
+========== Order Service 執行 ==========
+Order Service
+    ↓ 收到建議：ShouldOpen = true
+    ↓
+    ↓ 【執行開倉】
+    ↓ OKX API: placeOrder({
+    ↓   side: BUY,
+    ↓   price: 4150,
+    ↓   size: 200 / 4150 = 0.048 BTC
+    ↓ })
+    ↓
+    ↓ 【記錄倉位】
+    ↓ positions.append({
+    ↓   orderId: "order_123",
+    ↓   entryPrice: 4150,
+    ↓   size: 200,
+    ↓   takeProfit: 0.015,
+    ↓   openTime: now()
+    ↓ })
+    ↓
+    ↓ 【更新冷卻期】
+    ↓ lastOpenTime = now()
+    ↓
+    ↓ 【計算並掛出場單】
+    ↓ avgCost = calculateAverageCost([{4200, 200}, {4150, 200}])
+    ↓          = (4200 * 200 + 4150 * 200) / 400 = 4175
+    ↓ breakEvenPrice = 4175 * (1 + 0.001) = 4179.175
+    ↓
+    ↓ OKX API: placeOrder({
+    ↓   side: SELL,
+    ↓   price: 4179.175,
+    ↓   size: 400 / 4179.175 = 0.096 BTC
+    ↓ })
 ```
 
-**DDD 數據流說明**：
-1. **Infrastructure → Application**: Candle 訂閱器接收數據，提取價格，調用應用層用例
-2. **Application → Domain**: 應用層創建 Price 值對象，調用領域邏輯
-3. **Domain**: 純業務邏輯計算，返回 Signal 值對象（或 nil）
-4. **Application → Infrastructure**: 通過端口介面發布信號到 Redis
+### **DDD 數據流說明（被動模式）**
+
+1. **Order Service → Application Layer**:
+   - Order Service 發起請求：`GetOpenAdvice(instID, currentPrice)`
+   - 風險控制在 Order Service 完成（倉位、保證金、冷卻期）
+
+2. **Application → Infrastructure**:
+   - 從 Redis 讀取最新 Candle：`candle.latest.5m.BTC-USDT-SWAP`
+   - 使用 `MarketDataReader` 介面（端口）
+
+3. **Application → Domain**:
+   - 創建 Price 值對象
+   - 調用領域邏輯：`GridAggregate.GetOpenAdvice(price, candle)`
+
+4. **Domain**:
+   - 純業務邏輯計算
+   - 無狀態設計（每次請求都從 Redis 讀取最新數據）
+   - 返回 `OpenAdvice` 值對象
+
+5. **Domain → Application → Order Service**:
+   - 建議返回給 Order Service
+   - Order Service 決定是否執行開倉
+
+### **關鍵設計決策**
+
+| 設計點 | 主動模式（舊） | 被動模式（新）⭐ |
+|--------|--------------|----------------|
+| **觸發方式** | Strategy 訂閱價格 | Order Service 請求諮詢 |
+| **狀態管理** | Strategy 記錄 lastCandle | 無狀態，每次從 Redis 讀取 |
+| **風險控制** | Order Service 過濾信號 | Order Service 請求前檢查 |
+| **信號推送** | Redis Pub/Sub | 請求-響應（while/gRPC） |
+| **優勢** | 實時性高 | 避免無用信號，風險控制在源頭 |
+| **劣勢** | 大量無用信號 | 依賴輪詢（未來用 gRPC 改善） |
 
 ---
 
@@ -977,6 +1538,7 @@ Order Service
 
 ---
 
-*最後更新: 2025-10-17*
-*當前進度: Phase 1 - 實作開倉策略（方案 A 架構重構中）*
-*下一步: 完成策略實例模式，加入趨勢判斷器*
+*最後更新: 2025-10-19*
+*架構模式: DDD (Domain-Driven Design) + 被動諮詢模式 ⭐*
+*當前進度: 重構為被動模式（從主動 Pub/Sub 改為請求-響應）*
+*下一步: 完成 Phase 1-4 重構任務，測試完整流程*

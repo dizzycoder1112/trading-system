@@ -4,85 +4,115 @@ import (
 	"context"
 
 	"dizzycode.xyz/logger"
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies"
+	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies/grid"
 	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 )
 
-// SignalPublisher 信號發布器介面（端口）
+// MarketDataReader 介面（端口）⭐
 // 應用層定義介面，基礎設施層實現
-type SignalPublisher interface {
-	Publish(ctx context.Context, signal value_objects.Signal) error
+type MarketDataReader interface {
+	// GetLastestCandle 從 Redis 讀取最新的已確認 Candle（歷史第一根）
+	// Key format: candle.history.{bar}.{instId}
+	// 用於策略計算：開倉點位 = 上一根已確認 K 線的 MidLow
+	// 如果不存在則返回 error
+	GetLatestCandle(ctx context.Context, instID string, bar string) (value_objects.Candle, error)
+	GetLatestPrice(ctx context.Context, instID string) (value_objects.Price, error)
+
+	// GetCandleHistories 從 Redis 讀取歷史 Candle 列表
+	// Key format: candle.history.{bar}.{instId}
+	// 返回最近 N 根已確認的 K 線（用於趨勢分析）
+	GetCandleHistories(ctx context.Context, instID string, bar string) ([]value_objects.Candle, error)
 }
 
-// StrategyService 策略應用服務
+// StrategyService 策略應用服務（被動諮詢模式）⭐
 // 職責：
 // 1. 編排領域對象
-// 2. 處理用例流程
+// 2. 處理用例流程（GetOpenAdvice）
 // 3. 協調基礎設施（通過介面）
 type StrategyService struct {
-	strategy  strategies.Strategy  // ⭐ 使用 Strategy 介面，支援多種策略
-	publisher SignalPublisher
-	logger    logger.Logger
+	grid       *grid.GridAggregate // ⭐ 直接使用 GridAggregate
+	dataReader MarketDataReader    // ⭐ 新增：從 Redis 讀取市場數據
+	logger     logger.Logger
 }
 
 // NewStrategyService 創建策略服務
 func NewStrategyService(
-	strategy strategies.Strategy,  // ⭐ 接受任何實現 Strategy 介面的策略
-	publisher SignalPublisher,
+	grid *grid.GridAggregate, // ⭐ 接受 GridAggregate
+	dataReader MarketDataReader, // ⭐ 新增參數
 	logger logger.Logger,
 ) *StrategyService {
 	return &StrategyService{
-		strategy:  strategy,
-		publisher: publisher,
-		logger:    logger,
+		grid:       grid,
+		dataReader: dataReader,
+		logger:     logger,
 	}
 }
 
-// HandleCandleUpdate 處理 K線更新用例
+// GetOpenAdvice 獲取開倉建議（被動諮詢用例）⭐
 // 這是應用層的入口方法
-func (s *StrategyService) HandleCandleUpdate(ctx context.Context, candle value_objects.Candle) error {
-	// 1. 調用領域邏輯（Candle 已經過驗證）
-	signal, err := s.strategy.ProcessCandle(candle)
+func (s *StrategyService) GetOpenAdvice(
+	ctx context.Context,
+	instID string,
+) (*grid.OpenAdvice, error) {
+	// 1. 從 Redis 讀取最新的已確認 Candle（歷史第一根）⭐
+	lastCandle, err := s.dataReader.GetLatestCandle(ctx, instID, "5m")
 	if err != nil {
-		s.logger.Warn("Candle processing failed", map[string]any{
-			"error": err,
-			"close": candle.Close().Value(),
+		s.logger.Error("Failed to get last confirmed candle", map[string]any{
+			"error":  err,
+			"instId": instID,
 		})
-		return err
+		return nil, err
 	}
 
-	// 2. 如果沒有信號，直接返回
-	if signal == nil {
-		s.logger.Debug("No signal generated", map[string]any{
-			"close": candle.Close().Value(),
-			"low":   candle.Low().Value(),
-			"high":  candle.High().Value(),
+	candlehistories, err := s.dataReader.GetCandleHistories(ctx, instID, "5m")
+	if err != nil {
+		s.logger.Error("Failed to get last confirmed candle", map[string]any{
+			"error":  err,
+			"instId": instID,
 		})
-		return nil
+		return nil, err
 	}
 
-	// 3. 有信號，記錄日誌
-	s.logger.Info("Signal generated", map[string]any{
-		"action":       signal.Action(),
-		"price":        signal.Price().Value(),
-		"positionSize": signal.PositionSize(),
-		"takeProfit":   signal.TakeProfit(),
-		"reason":       signal.Reason(),
+	s.logger.Debug("Retrieved last confirmed candle", map[string]any{
+		"close": lastCandle.Close().Value(),
+		"low":   lastCandle.Low().Value(),
+		"high":  lastCandle.High().Value(),
 	})
 
-	// 4. 發布信號到基礎設施
-	if err := s.publisher.Publish(ctx, *signal); err != nil {
-		s.logger.Error("Failed to publish signal", map[string]any{
-			"error":  err,
-			"signal": signal,
+	currentPrice, err := s.dataReader.GetLatestPrice(ctx, instID)
+
+	if err != nil {
+		s.logger.Warn("Failed to get current price", map[string]any{
+			"error": err,
 		})
-		return err
+		return nil, err
 	}
 
-	return nil
+	// 2. 創建價格值對象
+
+	// 3. 調用領域邏輯獲取建議
+	advice := s.grid.GetOpenAdvice(currentPrice, lastCandle, candlehistories)
+
+	// 4. 記錄日誌
+	// if advice.ShouldOpen {
+	// 	s.logger.Info("Open advice: SHOULD OPEN", map[string]any{
+	// 		"currentPrice": currentPrice,
+	// 		"openPrice":    advice.OpenPrice,
+	// 		"positionSize": advice.PositionSize,
+	// 		"takeProfit":   advice.TakeProfit,
+	// 		"reason":       advice.Reason,
+	// 	})
+	// } else {
+	// 	s.logger.Debug("Open advice: SHOULD NOT OPEN", map[string]any{
+	// 		"currentPrice": currentPrice,
+	// 		"reason":       advice.Reason,
+	// 	})
+	// }
+
+	return &advice, nil
 }
 
 // GetStrategyState 獲取策略狀態（查詢用例）
 func (s *StrategyService) GetStrategyState() map[string]any {
-	return s.strategy.GetState()
+	return s.grid.GetState()
 }

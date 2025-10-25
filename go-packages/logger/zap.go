@@ -1,6 +1,9 @@
 package logger
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -10,6 +13,7 @@ import (
 type ZapLogger struct {
 	zap         *zap.Logger
 	serviceName string
+	isPretty    bool // ✅ Enable multi-line JSON formatting in development mode
 }
 
 // ZapOptions configures the Zap logger
@@ -79,6 +83,7 @@ func NewZap(opts ZapOptions) (Logger, error) {
 	return &ZapLogger{
 		zap:         zapLogger,
 		serviceName: opts.ServiceName,
+		isPretty:    opts.IsPretty, // ✅ Save pretty mode configuration
 	}, nil
 }
 
@@ -108,24 +113,70 @@ func (z *ZapLogger) convertContext(context []any) []zap.Field {
 	return fields
 }
 
+// formatPrettyMessage formats message with multi-line JSON for development mode
+func (z *ZapLogger) formatPrettyMessage(msg string, context []any) string {
+	if len(context) == 0 {
+		return msg
+	}
+
+	contextMap := ParseContext(context)
+	if len(contextMap) == 0 {
+		return msg
+	}
+
+	// Add service name to context
+	contextMap["service"] = z.serviceName
+
+	// Format as indented JSON
+	jsonBytes, err := json.MarshalIndent(contextMap, "", "  ")
+	if err != nil {
+		// Fallback to original message if JSON formatting fails
+		return msg
+	}
+
+	return fmt.Sprintf("%s\n%s", msg, string(jsonBytes))
+}
+
 func (z *ZapLogger) Info(msg string, context ...any) {
-	fields := z.convertContext(context)
-	z.zap.Info(msg, fields...)
+	if z.isPretty && len(context) > 0 {
+		// ✅ Pretty mode: format as multi-line JSON
+		prettyMsg := z.formatPrettyMessage(msg, context)
+		z.zap.Info(prettyMsg)
+	} else {
+		// Production mode: structured fields
+		fields := z.convertContext(context)
+		z.zap.Info(msg, fields...)
+	}
 }
 
 func (z *ZapLogger) Error(msg string, context ...any) {
-	fields := z.convertContext(context)
-	z.zap.Error(msg, fields...)
+	if z.isPretty && len(context) > 0 {
+		prettyMsg := z.formatPrettyMessage(msg, context)
+		z.zap.Error(prettyMsg)
+	} else {
+		fields := z.convertContext(context)
+		z.zap.Error(msg, fields...)
+	}
 }
 
 func (z *ZapLogger) Warn(msg string, context ...any) {
-	fields := z.convertContext(context)
-	z.zap.Warn(msg, fields...)
+	if z.isPretty && len(context) > 0 {
+		prettyMsg := z.formatPrettyMessage(msg, context)
+		z.zap.Warn(prettyMsg)
+	} else {
+		fields := z.convertContext(context)
+		z.zap.Warn(msg, fields...)
+	}
 }
 
 func (z *ZapLogger) Debug(msg string, context ...any) {
-	fields := z.convertContext(context)
-	z.zap.Debug(msg, fields...)
+	if z.isPretty && len(context) > 0 {
+		prettyMsg := z.formatPrettyMessage(msg, context)
+		z.zap.Debug(prettyMsg)
+	} else {
+		fields := z.convertContext(context)
+		z.zap.Debug(msg, fields...)
+	}
 }
 
 // Sync flushes any buffered log entries

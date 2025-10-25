@@ -5,10 +5,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"dizzycode.xyz/trading-strategy-server/internal/application"
 	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies/grid"
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/config"
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/logger"
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/messaging"
@@ -42,20 +42,18 @@ func main() {
 
 	log.Info("Connected to Redis", map[string]any{"addr": cfg.Redis.Addr})
 
-	// 4. 創建基礎設施層 - Signal 發布器
-	signalPublisher := messaging.NewRedisSignalPublisher(redisClient, log)
+	// 4. 創建基礎設施層 - Market Data Reader ⭐
+	dataReader := messaging.NewMarketDataReader(redisClient, log)
 
-	// 5. 創建領域層 - GridAggregate (one per instrument)
-	// For now, handle first instrument only
+	// 5. 創建領域層 - GridAggregate
 	if len(cfg.Strategy.Instruments) == 0 {
 		log.Error("No instruments configured", map[string]any{})
 		os.Exit(1)
 	}
 
 	instID := cfg.Strategy.Instruments[0]
-	grid, err := grid.NewGridAggregate(
+	gridAggregate, err := grid.NewGridAggregate(
 		instID,
-		cfg.Strategy.Grid.PositionSize,
 		cfg.Strategy.Grid.TakeProfitMin,
 		cfg.Strategy.Grid.TakeProfitMax,
 	)
@@ -65,40 +63,73 @@ func main() {
 	}
 
 	log.Info("Grid aggregate created", map[string]any{
-		"instId":        instID,
-		"positionSize":  cfg.Strategy.Grid.PositionSize,
-		"takeProfitMin": cfg.Strategy.Grid.TakeProfitMin,
-		"takeProfitMax": cfg.Strategy.Grid.TakeProfitMax,
+		"instId":        gridAggregate.InstID,
+		"positionSize":  gridAggregate.PositionSize,
+		"takeProfitMin": gridAggregate.TakeProfitMin,
+		"takeProfitMax": gridAggregate.TakeProfitMax,
 	})
 
-	// 6. 創建應用層 - StrategyService
-	strategyService := application.NewStrategyService(grid, signalPublisher, log)
+	// 6. 創建應用層 - StrategyService ⭐
+	strategyService := application.NewStrategyService(gridAggregate, dataReader, log)
 
-	// 7. 創建基礎設施層 - Candle 訂閱器
-	candleSubscriber := messaging.NewCandleSubscriber(redisClient, log)
+	log.Info("Trading Strategy Server started successfully", map[string]any{
+		"mode":        "passive_advisory", // 被動諮詢模式
+		"instId":      instID,
+		"description": "Waiting for Order Service requests",
+	})
 
-	// 8. 啟動訂閱循環
+	// 7. 模擬 Order Service 請求循環 ⭐
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	go func() {
-		if err := candleSubscriber.Subscribe(
-			ctx,
-			instID,
-			"5m", // 5-minute candles as per strategy document
-			func(candle value_objects.Candle) error {
-				// Call application layer use case
-				return strategyService.HandleCandleUpdate(ctx, candle)
-			},
-		); err != nil && err != context.Canceled {
-			log.Error("Candle subscription failed", map[string]any{"error": err})
+		ticker := time.NewTicker(5 * time.Second) // 每 5 秒詢問一次
+		defer ticker.Stop()
+
+		log.Info("Order Service simulation: Started", map[string]any{
+			"interval": "5 seconds",
+		})
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				// 模擬：從 Redis 讀取當前價格
+				currentPrice, err := dataReader.GetLatestPrice(ctx, instID)
+				if err != nil {
+					log.Warn("Failed to get current price", map[string]any{
+						"error": err,
+					})
+					continue
+				}
+
+				log.Info("🔍 Order Service: Querying open advice", map[string]any{
+					"currentPrice": currentPrice.String(),
+				})
+
+				// 調用策略服務獲取建議
+				advice, err := strategyService.GetOpenAdvice(ctx, instID)
+				if err != nil {
+					log.Error("Failed to get open advice", map[string]any{
+						"error": err,
+					})
+					continue
+				}
+
+				// 輸出建議結果
+				if advice.ShouldOpen {
+					log.Info("✅ Order Service: SHOULD OPEN POSITION", map[string]any{
+						"advice": advice,
+					})
+				} else {
+					log.Debug("❌ Order Service: Should not open", map[string]any{
+						"reason": advice.Reason,
+					})
+				}
+			}
 		}
 	}()
-
-	log.Info("Trading Strategy Server started successfully", map[string]any{
-		"instruments": cfg.Strategy.Instruments,
-		"listening":   "market.candle.5m." + instID,
-	})
 
 	// 9. 等待退出信號
 	quit := make(chan os.Signal, 1)

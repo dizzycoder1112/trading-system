@@ -9,7 +9,7 @@ import (
 func New(cfg *config.Config) (logger.Logger, error) {
 	return logger.NewZap(logger.ZapOptions{
 		ServiceName: "trading-strategy-server",
-		IsPretty:    cfg.Environment != "production",
+		IsPretty:    cfg.Environment == "development", // ✅ 启用美化输出
 		Level:       parseLogLevel(cfg.LogLevel),
 	})
 }
