@@ -17,7 +17,8 @@
     "start:dev": "docker compose -f docker-compose.local.yml up -d --build && pnpm run watch",
     "watch": "turbo run watch",
     "buf:gen": "cd proto && pnpm dlx @bufbuild/buf generate",
-    "log-tool": "./log-tool.sh"
+    "log-tool": "./log-tool.sh",
+    "download:okx": "tsx scripts/download_okx_history.ts"
   },
   "devDependencies": {
     "@bufbuild/protoc-gen-es": "^1.10.1",
@@ -26,6 +27,7 @@
     "blessed": "^0.1.81",
     "child_process": "^1.0.2",
     "prettier": "^3.5.3",
+    "tsx": "^4.19.4",
     "turbo": "^2.5.3",
     "typescript": "^5.8.2"
   }

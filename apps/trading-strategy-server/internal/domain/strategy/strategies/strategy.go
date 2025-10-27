@@ -1,6 +1,6 @@
 package strategies
 
-import "dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
+import "dizzycode.xyz/shared/domain/value_objects"
 
 // Strategy 策略介面（多態）
 // 所有策略必須實現此介面

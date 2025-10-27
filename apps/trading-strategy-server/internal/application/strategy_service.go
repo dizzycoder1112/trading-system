@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"dizzycode.xyz/logger"
+	"dizzycode.xyz/shared/domain/value_objects"
 	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies/grid"
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
 )
 
 // MarketDataReader 介面（端口）⭐

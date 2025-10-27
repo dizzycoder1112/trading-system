@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"dizzycode.xyz/logger"
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
+	"dizzycode.xyz/shared/domain/value_objects"
 )
 
 // RedisSignalPublisher implements the SignalPublisher port from application layer

@@ -1,0 +1,10 @@
+# 忽略所有歷史數據文件
+*.json
+*.csv
+*.parquet
+
+# 但保留 .gitignore 本身
+!.gitignore
+
+# 可以保留範例文件（如果有的話）
+!sample.json

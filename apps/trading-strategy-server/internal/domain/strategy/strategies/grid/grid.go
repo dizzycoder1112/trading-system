@@ -6,8 +6,16 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/value_objects"
+	"dizzycode.xyz/shared/domain/value_objects"
 )
+
+// GridConfig 網格策略配置
+type GridConfig struct {
+	InstID        string  // 交易對
+	PositionSize  float64 // 單次開倉大小（美元）
+	TakeProfitMin float64 // 最小停利百分比
+	TakeProfitMax float64 // 最大停利百分比
+}
 
 // OpenAdvice 開倉建議（領域值對象）
 type OpenAdvice struct {
@@ -36,22 +44,21 @@ type GridAggregate struct {
 }
 
 // NewGridAggregate 創建網格聚合根（工廠方法）
-func NewGridAggregate(instID string, takeProfitMin, takeProfitMax float64) (*GridAggregate, error) {
+func NewGridAggregate(config GridConfig) (*GridAggregate, error) {
 	// 驗證業務規則
-
-	if takeProfitMin <= 0 || takeProfitMax <= 0 {
+	if config.TakeProfitMin <= 0 || config.TakeProfitMax <= 0 {
 		return nil, errors.New("take profit must be positive")
 	}
 
-	if takeProfitMin > takeProfitMax {
+	if config.TakeProfitMin > config.TakeProfitMax {
 		return nil, errors.New("take profit min must be <= max")
 	}
 
 	return &GridAggregate{
-		InstID:        instID,
-		PositionSize:  200,
-		TakeProfitMin: takeProfitMin,
-		TakeProfitMax: takeProfitMax,
+		InstID:        config.InstID,
+		PositionSize:  config.PositionSize,
+		TakeProfitMin: config.TakeProfitMin,
+		TakeProfitMax: config.TakeProfitMax,
 		Calculator:    NewGridCalculator(),
 	}, nil
 }
@@ -115,7 +122,7 @@ func (g *GridAggregate) GetOpenAdvice(
 		CurrentPrice: currentPriceDecimal.String(),
 		OpenPrice:    openPriceDecimal.String(),  // 例: "3889.94" (舍去)
 		ClosePrice:   closePriceDecimal.String(), // 例: "3895.78" (进位)
-		PositionSize: 200.0,
+		PositionSize: g.PositionSize,
 		TakeProfit:   takeProfit, // 0.0015 (0.15%)
 		Reason:       "simulated_advice",
 	}

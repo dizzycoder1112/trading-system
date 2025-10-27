@@ -1,6 +1,7 @@
 go 1.25.1
 
 use (
+	./go-packages/shared
 	./apps/market-data-server
 	./apps/order-server
 	./apps/trading-strategy-server

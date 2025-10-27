@@ -14,6 +14,10 @@ import (
 	"dizzycode.xyz/trading-strategy-server/internal/infrastructure/messaging"
 )
 
+const (
+	positionSize = 200.0 // 固定單次開倉大小為 200 美元
+)
+
 func main() {
 	// 1. 載入配置
 	cfg := config.Load()
@@ -53,10 +57,12 @@ func main() {
 
 	instID := cfg.Strategy.Instruments[0]
 	gridAggregate, err := grid.NewGridAggregate(
-		instID,
-		cfg.Strategy.Grid.TakeProfitMin,
-		cfg.Strategy.Grid.TakeProfitMax,
-	)
+		grid.GridConfig{
+			InstID:        instID,
+			PositionSize:  positionSize, // 固定單次開倉大小為 200 美元
+			TakeProfitMin: cfg.Strategy.Grid.TakeProfitMin,
+			TakeProfitMax: cfg.Strategy.Grid.TakeProfitMax,
+		})
 	if err != nil {
 		log.Error("Failed to create grid aggregate", map[string]any{"error": err})
 		os.Exit(1)
