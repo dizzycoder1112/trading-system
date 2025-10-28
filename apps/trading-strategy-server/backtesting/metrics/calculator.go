@@ -8,19 +8,24 @@ import (
 
 // BacktestResult 回测结果
 type BacktestResult struct {
-	InitialBalance  float64       // 初始资金
-	FinalBalance    float64       // 最终资金
-	TotalReturn     float64       // 总收益率 (%)
-	MaxDrawdown     float64       // 最大回撤 (%)
-	WinRate         float64       // 胜率 (%)
-	TotalTrades     int           // 总交易次数
-	WinningTrades   int           // 盈利交易次数
-	LosingTrades    int           // 亏损交易次数
-	AvgHoldDuration time.Duration // 平均持仓时长
-	ProfitFactor    float64       // 盈亏比 (总盈利/总亏损)
-	TotalProfit     float64       // 总盈利金额
-	TotalLoss       float64       // 总亏损金额
-	NetProfit       float64       // 净利润 (最终资金 - 初始资金)
+	InitialBalance    float64       // 初始资金
+	FinalBalance      float64       // 最终资金（可用余额）
+	OpenPositionCount int           // 未平仓数量 ⭐
+	OpenPositionValue float64       // 未平仓总价值 ⭐
+	UnrealizedPnL     float64       // 未实现盈亏 ⭐
+	TotalEquity       float64       // 总权益（余额 + 未平仓价值）⭐
+	TotalFeesPaid     float64       // 总手续费支出 ⭐
+	TotalReturn       float64       // 总收益率 (%)
+	MaxDrawdown       float64       // 最大回撤 (%)
+	WinRate           float64       // 胜率 (%)
+	TotalTrades       int           // 总交易次数（已平仓）
+	WinningTrades     int           // 盈利交易次数
+	LosingTrades      int           // 亏损交易次数
+	AvgHoldDuration   time.Duration // 平均持仓时长
+	ProfitFactor      float64       // 盈亏比 (总盈利/总亏损)
+	TotalProfit       float64       // 总盈利金额
+	TotalLoss         float64       // 总亏损金额
+	NetProfit         float64       // 净利润（包含未实现盈亏）⭐
 }
 
 // BalanceSnapshot 资金快照（用于计算最大回撤）
@@ -54,21 +59,35 @@ func (mc *MetricsCalculator) RecordBalance(timestamp time.Time, balance float64)
 // Calculate 计算回测指标
 //
 // 参数：
-//   - positionTracker: 仓位追踪器（包含所有已平仓记录）
-//   - finalBalance: 最终资金
+//   - positionTracker: 仓位追踪器（包含所有已平仓记录和未平仓）
+//   - finalBalance: 最终可用资金（不包含未平仓）
+//   - lastPrice: 最后价格（用于计算未实现盈亏）
 //
 // 返回：
 //   - BacktestResult: 回测结果
 func (mc *MetricsCalculator) Calculate(
 	positionTracker *simulator.PositionTracker,
 	finalBalance float64,
+	lastPrice float64,
 ) BacktestResult {
 	closedPositions := positionTracker.GetClosedPositions()
 	totalTrades := len(closedPositions)
 
-	// 1. 计算总收益率
-	// TotalReturn = (FinalBalance - InitialBalance) / InitialBalance * 100
-	netProfit := finalBalance - mc.initialBalance
+	// 1. 计算未平仓信息 ⭐
+	openPositions := positionTracker.GetOpenPositions()
+	openPositionCount := len(openPositions)
+	openPositionValue := positionTracker.GetTotalSize()
+
+	// 计算未实现盈亏（使用最后价格）
+	feeRate := 0.0005 // OKX Taker 手续费
+	unrealizedPnL := positionTracker.CalculateUnrealizedPnL(lastPrice, feeRate)
+
+	// 计算总权益（可用余额 + 未平仓价值 + 未实现盈亏）
+	totalEquity := finalBalance + openPositionValue + unrealizedPnL
+
+	// 2. 计算总收益率（基于总权益）⭐
+	// TotalReturn = (TotalEquity - InitialBalance) / InitialBalance * 100
+	netProfit := totalEquity - mc.initialBalance
 	totalReturn := 0.0
 	if mc.initialBalance > 0 {
 		totalReturn = (netProfit / mc.initialBalance) * 100
@@ -111,19 +130,23 @@ func (mc *MetricsCalculator) Calculate(
 	avgHoldDuration := positionTracker.GetAverageHoldDuration()
 
 	return BacktestResult{
-		InitialBalance:  mc.initialBalance,
-		FinalBalance:    finalBalance,
-		TotalReturn:     totalReturn,
-		MaxDrawdown:     maxDrawdown,
-		WinRate:         winRate,
-		TotalTrades:     totalTrades,
-		WinningTrades:   winningTrades,
-		LosingTrades:    losingTrades,
-		AvgHoldDuration: avgHoldDuration,
-		ProfitFactor:    profitFactor,
-		TotalProfit:     totalProfit,
-		TotalLoss:       totalLoss,
-		NetProfit:       netProfit,
+		InitialBalance:    mc.initialBalance,
+		FinalBalance:      finalBalance,
+		OpenPositionCount: openPositionCount,       // ⭐ 未平仓数量
+		OpenPositionValue: openPositionValue,       // ⭐ 未平仓总价值
+		UnrealizedPnL:     unrealizedPnL,           // ⭐ 未实现盈亏
+		TotalEquity:       totalEquity,             // ⭐ 总权益
+		TotalReturn:       totalReturn,             // 基于总权益计算
+		MaxDrawdown:       maxDrawdown,
+		WinRate:           winRate,
+		TotalTrades:       totalTrades,
+		WinningTrades:     winningTrades,
+		LosingTrades:      losingTrades,
+		AvgHoldDuration:   avgHoldDuration,
+		ProfitFactor:      profitFactor,
+		TotalProfit:       totalProfit,
+		TotalLoss:         totalLoss,
+		NetProfit:         netProfit,               // 包含未实现盈亏
 	}
 }
 

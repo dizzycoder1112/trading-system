@@ -35,7 +35,7 @@ const MAX_LIMIT = 300; // OKX 每次最多返回 300 條
 function parseArgs(): DownloadOptions {
   const args = process.argv.slice(2);
   const options: Partial<DownloadOptions> = {
-    outputDir: 'apps/backtesting/data',
+    outputDir: 'apps/trading-strategy-server/data',
   };
 
   for (const arg of args) {
@@ -212,24 +212,27 @@ async function downloadAllCandles(options: DownloadOptions): Promise<string[][]>
 }
 
 /**
- * 生成文件名
- * 格式: 20251001-20251026-5m-ETH-USDT-SWAP.json
+ * 生成文件夾名稱
+ * 格式: 20240930-20241001-5m-ETH-USDT-SWAP
  */
-function generateFilename(options: DownloadOptions): string {
+function generateFolderName(options: DownloadOptions): string {
   const { instId, bar, after, before } = options;
 
   const afterDate = new Date(after).toISOString().split('T')[0].replace(/-/g, '');
   const beforeDate = new Date(before).toISOString().split('T')[0].replace(/-/g, '');
 
-  return `${afterDate}-${beforeDate}-${bar}-${instId}.json`;
+  return `${afterDate}-${beforeDate}-${bar}-${instId}`;
 }
 
 /**
  * 保存數據到文件
+ * 輸出路徑: {outputDir}/{folderName}/histories.json
+ * 例如: apps/trading-strategy-server/data/20240930-20241001-5m-ETH-USDT-SWAP/histories.json
  */
 async function saveToFile(options: DownloadOptions, data: string[][]): Promise<void> {
-  const filename = generateFilename(options);
-  const filepath = `${options.outputDir}/${filename}`;
+  const folderName = generateFolderName(options);
+  const folderPath = `${options.outputDir}/${folderName}`;
+  const filepath = `${folderPath}/histories.json`;
 
   const output: OKXCandleResponse = {
     code: '0',
@@ -239,8 +242,8 @@ async function saveToFile(options: DownloadOptions, data: string[][]): Promise<v
 
   const fs = await import('fs/promises');
 
-  // 確保目錄存在
-  await fs.mkdir(options.outputDir, { recursive: true });
+  // 確保目錄存在（創建文件夾）
+  await fs.mkdir(folderPath, { recursive: true });
 
   // 寫入文件
   await fs.writeFile(filepath, JSON.stringify(output, null, 2), 'utf-8');

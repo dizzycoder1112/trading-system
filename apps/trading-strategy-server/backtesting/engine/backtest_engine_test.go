@@ -14,8 +14,8 @@ func TestBacktestEngine_NewBacktestEngine(t *testing.T) {
 		FeeRate:        0.0005,
 		Slippage:       0,
 		InstID:         "ETH-USDT-SWAP",
-		TakeProfitMin:  0.0015,
-		TakeProfitMax:  0.0020,
+		TakeProfitMin:  0.0020,
+		TakeProfitMax:  0.0030,
 	}
 
 	engine, err := NewBacktestEngine(config)

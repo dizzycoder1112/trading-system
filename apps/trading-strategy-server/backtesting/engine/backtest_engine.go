@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"os"
+	"time"
 
 	"dizzycode.xyz/shared/domain/value_objects"
 	"dizzycode.xyz/trading-strategy-server/backtesting/loader"
@@ -18,6 +20,7 @@ type BacktestConfig struct {
 	InstID         string  // 交易對 (e.g., "ETH-USDT-SWAP")
 	TakeProfitMin  float64 // 最小停利百分比
 	TakeProfitMax  float64 // 最大停利百分比
+	PositionSize   float64 // 單次開倉大小 (USDT)
 }
 
 // BacktestEngine 回測引擎核心
@@ -27,6 +30,22 @@ type BacktestEngine struct {
 	positionTracker *simulator.PositionTracker // 倉位追蹤器
 	calculator      *metrics.MetricsCalculator // 指標計算器
 	config          BacktestConfig             // 配置
+	tradeLog        []TradeLog                 // 交易日誌 ⭐ DEBUG
+}
+
+// TradeLog 交易日誌（用於 debug）
+type TradeLog struct {
+	TradeID      int       // 交易序號
+	Time         time.Time // 時間
+	Action       string    // OPEN / CLOSE
+	Price        float64   // 價格
+	PositionSize float64   // 倉位大小
+	Balance      float64   // 當前餘額
+	PnLPercent   float64   // 盈虧百分比（僅平倉時）⭐
+	PnL          float64   // 盈虧金額（僅平倉時，未扣手續費）⭐
+	Fee          float64   // 手續費 ⭐
+	Reason       string    // 原因
+	PositionID   string    // 倉位ID（關聯開倉和平倉）⭐
 }
 
 // NewBacktestEngine 創建回測引擎
@@ -34,7 +53,7 @@ func NewBacktestEngine(config BacktestConfig) (*BacktestEngine, error) {
 	// 1. 創建真實的 Grid 策略 ⭐
 	strategy, err := grid.NewGridAggregate(grid.GridConfig{
 		InstID:        config.InstID,
-		PositionSize:  200, // 固定單次開倉大小為 200 美元
+		PositionSize:  config.PositionSize,
 		TakeProfitMin: config.TakeProfitMin,
 		TakeProfitMax: config.TakeProfitMax,
 	})
@@ -79,6 +98,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 	}
 
 	balance := e.config.InitialBalance
+	tradeCounter := 0 // 交易計數器
 
 	// 記錄初始資金
 	e.calculator.RecordBalance(candles[0].Timestamp(), balance)
@@ -101,6 +121,15 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					continue
 				}
 
+				// ⭐ 計算純粹的價差盈虧（不扣手續費）
+				priceChange := closedPos.ClosePrice - pos.EntryPrice
+				pnlPercent := (priceChange / pos.EntryPrice) * 100 // 百分比
+				pnlAmount := pos.Size * (priceChange / pos.EntryPrice) // 金額（未扣手續費）
+
+				// ⭐ 計算平倉時的實際價值和手續費
+				closeValue := pos.Size + pnlAmount // 平倉時的總價值（本金 + 盈虧）
+				closeFee := closeValue * e.config.FeeRate // 平倉手續費基於總價值
+
 				// 更新倉位追蹤器
 				err = e.positionTracker.ClosePosition(
 					pos.ID,
@@ -117,6 +146,22 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
+
+				// ⭐ 記錄平倉日誌
+				tradeCounter++
+				e.tradeLog = append(e.tradeLog, TradeLog{
+					TradeID:      tradeCounter,
+					Time:         currentTime,
+					Action:       "CLOSE",
+					Price:        closedPos.ClosePrice,
+					PositionSize: closeValue,  // ⭐ 平倉時的實際收回金額（含盈虧）
+					Balance:      balance,
+					PnLPercent:   pnlPercent, // ⭐ 盈虧百分比
+					PnL:          pnlAmount,   // ⭐ 盈虧金額（未扣手續費）
+					Fee:          closeFee,    // ⭐ 平倉手續費（基於實際價值）
+					Reason:       fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
+					PositionID:   pos.ID, // ⭐ 記錄倉位ID
+				})
 			}
 		}
 
@@ -165,8 +210,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					continue
 				}
 
+				// 計算開倉手續費
+				openFee := position.Size * e.config.FeeRate
+
 				// 更新倉位追蹤器
-				e.positionTracker.AddPosition(
+				newPosition := e.positionTracker.AddPosition(
 					position.EntryPrice,
 					position.Size,
 					position.OpenTime,
@@ -178,39 +226,35 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
+
+				// ⭐ 記錄開倉日誌
+				tradeCounter++
+				e.tradeLog = append(e.tradeLog, TradeLog{
+					TradeID:      tradeCounter,
+					Time:         currentTime,
+					Action:       "OPEN",
+					Price:        position.EntryPrice,
+					PositionSize: position.Size,
+					Balance:      balance,
+					PnL:          0,
+					Fee:          openFee, // ⭐ 記錄開倉手續費
+					Reason:       gridAdvice.Reason,
+					PositionID:   newPosition.ID, // ⭐ 記錄倉位ID
+				})
 			}
 		}
 	}
 
-	// ========== 步驟 4: 強制平倉所有未平倉 ==========
-	if e.positionTracker.HasOpenPositions() {
-		lastCandle := candles[len(candles)-1]
-		lastPrice := lastCandle.Close()
-		lastTime := lastCandle.Timestamp()
+	// ========== 步驟 4: 計算未實現盈虧（不強制平倉）==========
+	lastCandle := candles[len(candles)-1]
+	lastPrice := lastCandle.Close().Value()
+	lastTime := lastCandle.Timestamp()
 
-		// 平倉所有持倉
-		for _, pos := range e.positionTracker.GetOpenPositions() {
-			closedPos, revenue, err := e.simulator.SimulateClose(pos, lastPrice.Value(), lastTime)
-			if err != nil {
-				continue
-			}
+	// 記錄最終資金快照（不包含未平倉）
+	e.calculator.RecordBalance(lastTime, balance)
 
-			e.positionTracker.ClosePosition(
-				pos.ID,
-				closedPos.ClosePrice,
-				closedPos.CloseTime,
-				closedPos.RealizedPnL,
-			)
-
-			balance += revenue
-		}
-
-		// 記錄最終資金
-		e.calculator.RecordBalance(lastTime, balance)
-	}
-
-	// ========== 步驟 5: 計算回測指標 ==========
-	result := e.calculator.Calculate(e.positionTracker, balance)
+	// ========== 步驟 5: 計算回測指標（包含未實現盈虧）==========
+	result := e.calculator.Calculate(e.positionTracker, balance, lastPrice)
 
 	return result, nil
 }
@@ -243,4 +287,48 @@ func (e *BacktestEngine) GetPositionTracker() *simulator.PositionTracker {
 // GetMetricsCalculator 獲取指標計算器（用於調試）
 func (e *BacktestEngine) GetMetricsCalculator() *metrics.MetricsCalculator {
 	return e.calculator
+}
+
+// GetTradeLog 獲取交易日誌（用於 debug）
+func (e *BacktestEngine) GetTradeLog() []TradeLog {
+	return e.tradeLog
+}
+
+// GetTotalFees 計算總手續費
+func (e *BacktestEngine) GetTotalFees() float64 {
+	totalFees := 0.0
+	for _, log := range e.tradeLog {
+		totalFees += log.Fee
+	}
+	return totalFees
+}
+
+// ExportTradeLogCSV 導出交易日誌到 CSV 文件
+func (e *BacktestEngine) ExportTradeLogCSV(filepath string) error {
+	content := "TradeID,Time,Action,Price,PositionSize,Balance,PnL%,PnL,Fee,Reason,PositionID\n"
+
+	for _, log := range e.tradeLog {
+		line := fmt.Sprintf("%d,%s,%s,%.2f,%.2f,%.2f,%.4f,%.2f,%.8f,%s,%s\n",
+			log.TradeID,
+			log.Time.Format("2006-01-02 15:04:05"),
+			log.Action,
+			log.Price,        // 價格：2位小數
+			log.PositionSize, // 倉位大小：2位小數
+			log.Balance,      // 餘額：2位小數
+			log.PnLPercent,   // ⭐ 盈虧百分比：4位小數（例如：0.2145%）
+			log.PnL,          // ⭐ 盈虧金額：2位小數（未扣手續費）
+			log.Fee,          // ⭐ 手續費：8位小數（與OKX一致）
+			log.Reason,
+			log.PositionID,
+		)
+		content += line
+	}
+
+	// 寫入文件
+	err := os.WriteFile(filepath, []byte(content), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write CSV file: %w", err)
+	}
+
+	return nil
 }
