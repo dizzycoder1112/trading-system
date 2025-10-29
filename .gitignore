@@ -8,3 +8,15 @@
 /tmp
 **/tmp
 /kubernetes/secrets
+
+
+# 忽略編譯產物
+bin
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 測試覆蓋率
+*.out
+coverage.txt

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
@@ -13,19 +13,34 @@ import type {
   ISeriesMarkersPluginApi,
   Time,
   LineData,
+  CandlestickData,
+  MouseEventParams,
 } from 'lightweight-charts';
-import type { CandleData, ChartMarker } from '../types';
+import type { CandleData, ChartMarker, TradeData } from '../types';
 
 interface CandlestickChartProps {
   data: CandleData[];
+  trades?: TradeData[]; // ⭐ 新增：交易數據
   markers?: ChartMarker[];
   costBasisLine?: LineData[]; // 平均成本線數據
   width?: number;
   height?: number;
 }
 
+interface LegendData {
+  time: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  avgCost?: number;
+  openCount?: number; // ⭐ 開倉數量
+  closeCount?: number; // ⭐ 關倉數量
+}
+
 export function CandlestickChart({
   data,
+  trades = [], // ⭐ 接收交易數據
   markers = [],
   costBasisLine = [],
   width,
@@ -36,6 +51,16 @@ export function CandlestickChart({
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const costBasisSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+
+  // 圖例數據狀態
+  const [legendData, setLegendData] = useState<LegendData | null>(null);
+
+  // ⭐ 檢查 trades 數據
+  useEffect(() => {
+    if (trades.length > 0) {
+      console.log('✅ Trades loaded:', trades.length);
+    }
+  }, [trades]);
 
   useEffect(() => {
     if (!chartContainerRef.current) return;
@@ -144,6 +169,62 @@ export function CandlestickChart({
     }
   }, [costBasisLine]);
 
+  // ⭐ 監聽 Crosshair 移動事件（獨立 useEffect，依賴 trades）
+  useEffect(() => {
+    if (!chartRef.current || !seriesRef.current || !costBasisSeriesRef.current) return;
+
+    const chart = chartRef.current;
+    const candlestickSeries = seriesRef.current;
+    const costBasisSeries = costBasisSeriesRef.current;
+
+    const crosshairMoveHandler = (param: MouseEventParams) => {
+      if (!param.time) {
+        setLegendData(null);
+        return;
+      }
+
+      const candleData = param.seriesData.get(candlestickSeries) as CandlestickData | undefined;
+      const costBasisData = param.seriesData.get(costBasisSeries) as LineData | undefined;
+
+      if (candleData) {
+        const currentTimeStr = new Date((param.time as number) * 1000).toLocaleString('zh-TW', {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+
+        const currentTimestamp = param.time as number;
+        const tradesAtThisTime = trades.filter((trade) => {
+          const tradeTimestamp = Math.floor(Date.parse(trade.time + 'Z') / 1000);
+          const tradeCandleTime = Math.floor(tradeTimestamp / 300) * 300;
+          return tradeCandleTime === currentTimestamp;
+        });
+
+        const openCount = tradesAtThisTime.filter((t) => t.action === 'OPEN').length;
+        const closeCount = tradesAtThisTime.filter((t) => t.action === 'CLOSE').length;
+
+        setLegendData({
+          time: currentTimeStr,
+          open: candleData.open,
+          high: candleData.high,
+          low: candleData.low,
+          close: candleData.close,
+          avgCost: costBasisData?.value,
+          openCount: openCount > 0 ? openCount : undefined,
+          closeCount: closeCount > 0 ? closeCount : undefined,
+        });
+      }
+    };
+
+    chart.subscribeCrosshairMove(crosshairMoveHandler);
+
+    return () => {
+      chart.unsubscribeCrosshairMove(crosshairMoveHandler);
+    };
+  }, [trades]); // ⭐ 當 trades 更新時重新訂閱
+
   // 更新標記（v5 使用 createSeriesMarkers plugin）
   useEffect(() => {
     if (!seriesRef.current) return;
@@ -175,7 +256,70 @@ export function CandlestickChart({
 
   return (
     <div style={styles.container}>
+      {/* ⭐ Legend - 顯示當前 K 線數據 */}
+      {legendData && (
+        <div style={styles.legend}>
+          <div style={styles.legendRow}>
+            <span style={styles.legendLabel}>時間:</span>
+            <span style={styles.legendValue}>{legendData.time}</span>
+          </div>
+          <div style={styles.legendRow}>
+            <span style={styles.legendLabel}>O:</span>
+            <span style={{ ...styles.legendValue, color: '#888' }}>
+              {legendData.open.toFixed(2)}
+            </span>
+            <span style={styles.legendLabel}>H:</span>
+            <span style={{ ...styles.legendValue, color: '#26a69a' }}>
+              {legendData.high.toFixed(2)}
+            </span>
+            <span style={styles.legendLabel}>L:</span>
+            <span style={{ ...styles.legendValue, color: '#ef5350' }}>
+              {legendData.low.toFixed(2)}
+            </span>
+            <span style={styles.legendLabel}>C:</span>
+            <span
+              style={{
+                ...styles.legendValue,
+                color: legendData.close >= legendData.open ? '#26a69a' : '#ef5350',
+              }}
+            >
+              {legendData.close.toFixed(2)}
+            </span>
+            {legendData.avgCost && (
+              <>
+                <span style={styles.legendLabel}>平均成本:</span>
+                <span style={{ ...styles.legendValue, color: '#FFA500' }}>
+                  {legendData.avgCost.toFixed(2)}
+                </span>
+              </>
+            )}
+          </div>
+          {/* ⭐ 交易操作統計 */}
+          {(legendData.openCount || legendData.closeCount) && (
+            <div style={styles.legendRow}>
+              {legendData.openCount && (
+                <>
+                  <span style={styles.legendLabel}>開倉:</span>
+                  <span style={{ ...styles.legendValue, color: '#2196F3' }}>
+                    {legendData.openCount} 筆
+                  </span>
+                </>
+              )}
+              {legendData.closeCount && (
+                <>
+                  <span style={styles.legendLabel}>平倉:</span>
+                  <span style={{ ...styles.legendValue, color: '#9C27B0' }}>
+                    {legendData.closeCount} 筆
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <div ref={chartContainerRef} style={styles.chartWrapper} />
+
       {data.length === 0 && (
         <div style={styles.placeholder}>
           <p>📊 請先導入 K 線數據 (histories.json)</p>
@@ -190,6 +334,34 @@ const styles = {
     position: 'relative' as const,
     width: '100%',
     marginBottom: '20px',
+  },
+  legend: {
+    position: 'absolute' as const,
+    top: '10px',
+    left: '10px',
+    zIndex: 10,
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
+    padding: '10px 15px',
+    borderRadius: '6px',
+    border: '1px solid #2b2b43',
+    fontSize: '13px',
+    lineHeight: '1.6',
+    pointerEvents: 'none' as const,
+  },
+  legendRow: {
+    display: 'flex',
+    gap: '12px',
+    alignItems: 'center',
+  },
+  legendLabel: {
+    color: '#888',
+    fontWeight: 500,
+    minWidth: '20px',
+  },
+  legendValue: {
+    color: '#d1d4dc',
+    fontWeight: 600,
+    fontFamily: 'monospace',
   },
   chartWrapper: {
     width: '100%',

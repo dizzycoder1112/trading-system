@@ -24,8 +24,12 @@ export interface TradeData {
   price: number;
   positionSize: number;
   balance: number;
-  pnlPercent: number;
-  pnl: number;
+  openPositionValue: number; // ⭐ 累計持倉總價值
+  pnlPercent: number; // 基於單筆開倉價的盈虧百分比
+  pnl: number; // 基於單筆開倉價的盈虧金額
+  avgCost: number; // ⭐ 平倉時的平均成本
+  pnlPercentAvg: number; // ⭐ 基於平均成本的盈虧百分比
+  pnlAvg: number; // ⭐ 基於平均成本的盈虧金額
   fee: number;
   reason: string;
   positionId: string;

@@ -4,7 +4,7 @@ import type { TradeData, ChartMarker } from '../types';
 /**
  * 解析交易記錄 CSV 數據
  *
- * CSV 格式：TradeID,Time,Action,Price,PositionSize,Balance,PnL%,PnL,Fee,Reason,PositionID
+ * CSV 格式：TradeID,Time,Action,Price,PositionSize,Balance,OpenPositionValue,PnL%,PnL,AvgCost,PnL%_Avg,PnL_Avg,Fee,Reason,PositionID
  *
  * @param data - PapaParse 解析後的數據數組
  * @returns 解析後的交易數據數組
@@ -22,8 +22,12 @@ export function parseTradeCSV(data: Record<string, string>[]): TradeData[] {
           price: parseFloat(row.Price),
           positionSize: parseFloat(row.PositionSize),
           balance: parseFloat(row.Balance),
+          openPositionValue: parseFloat(row.OpenPositionValue || '0'), // ⭐ 新增
           pnlPercent: parseFloat(row['PnL%'] || row.PnLPercent || '0'),
           pnl: parseFloat(row.PnL || '0'),
+          avgCost: parseFloat(row.AvgCost || '0'), // ⭐ 新增
+          pnlPercentAvg: parseFloat(row['PnL%_Avg'] || row.PnLPercentAvg || '0'), // ⭐ 新增
+          pnlAvg: parseFloat(row.PnL_Avg || row.PnLAvg || '0'), // ⭐ 新增
           fee: parseFloat(row.Fee),
           reason: row.Reason || '',
           positionId: row.PositionID || '',
@@ -44,9 +48,9 @@ export function parseTradeCSV(data: Record<string, string>[]): TradeData[] {
  */
 export function tradesToMarkers(trades: TradeData[]): ChartMarker[] {
   return trades.map((trade) => {
-    // 將日期字符串轉換為 Unix timestamp（秒）
-    // UTCTimestamp 是 lightweight-charts 的 nominal type，需使用 type assertion
-    const timeInSeconds = (new Date(trade.time).getTime() / 1000) as UTCTimestamp;
+    // ⭐ 將日期字符串轉換為 Unix timestamp（秒）
+    // CSV 中的時間是 UTC+0，需要明確指定為 UTC 時間
+    const timeInSeconds = (Date.parse(trade.time + 'Z') / 1000) as UTCTimestamp;
 
     if (trade.action === 'OPEN') {
       return {
@@ -95,11 +99,10 @@ export function validateTradeData(trades: TradeData[]): boolean {
 /**
  * 計算平均成本線數據
  *
- * 遍歷交易記錄，追蹤未平倉部位的平均成本
- * - 將同一時間的交易合併處理（先 CLOSE 後 OPEN）
- * - 每個時間點只記錄一個數據點
- * - 開倉時：更新平均成本（加權平均）
- * - 平倉時：保持平均成本不變（部分平倉）或清空（完全平倉）
+ * ⭐ 簡化版本：只使用 OPEN 交易來構建平均成本線
+ * - 只有 OPEN 交易會改變平均成本
+ * - CLOSE 交易的 AvgCost 是平倉前的狀態，不應該顯示在成本線上
+ * - 當所有倉位被平倉後（打平出場），下一個 OPEN 會自動形成新的成本線
  *
  * @param trades - 交易數據數組
  * @returns 平均成本線數據數組
@@ -107,52 +110,20 @@ export function validateTradeData(trades: TradeData[]): boolean {
 export function calculateCostBasisLine(trades: TradeData[]): LineData[] {
   if (trades.length === 0) return [];
 
-  // 按時間分組交易
-  const tradesByTime = new Map<number, TradeData[]>();
-  for (const trade of trades) {
-    const timeInSeconds = Math.floor(new Date(trade.time).getTime() / 1000);
-    if (!tradesByTime.has(timeInSeconds)) {
-      tradesByTime.set(timeInSeconds, []);
-    }
-    tradesByTime.get(timeInSeconds)!.push(trade);
-  }
-
-  // 按時間排序
-  const sortedTimes = Array.from(tradesByTime.keys()).sort((a, b) => a - b);
-
   const costBasisData: LineData[] = [];
-  let currentSize = 0; // 當前總持倉大小
-  let totalCost = 0; // 總成本（所有部位的 price * size 加總）
 
-  // 遍歷每個時間點
-  for (const timeInSeconds of sortedTimes) {
-    const tradesAtTime = tradesByTime.get(timeInSeconds)!;
+  // ⭐ 只遍歷 OPEN 交易
+  const openTrades = trades.filter((trade) => trade.action === 'OPEN');
 
-    // 先處理所有 CLOSE（平倉）
-    for (const trade of tradesAtTime.filter((t) => t.action === 'CLOSE')) {
-      const avgCost = currentSize > 0 ? totalCost / currentSize : 0;
-      currentSize -= trade.positionSize;
+  for (const trade of openTrades) {
+    // ⭐ CSV 中的時間是 UTC+0，需要明確指定為 UTC 時間（添加 'Z' 後綴）
+    const timeInSeconds = Math.floor(Date.parse(trade.time + 'Z') / 1000);
 
-      if (currentSize <= 0) {
-        currentSize = 0;
-        totalCost = 0;
-      } else {
-        totalCost = avgCost * currentSize;
-      }
-    }
-
-    // 再處理所有 OPEN（開倉）
-    for (const trade of tradesAtTime.filter((t) => t.action === 'OPEN')) {
-      totalCost += trade.price * trade.positionSize;
-      currentSize += trade.positionSize;
-    }
-
-    // 在這個時間點，記錄最終的平均成本（如果有持倉）
-    if (currentSize > 0) {
-      const avgCost = totalCost / currentSize;
+    // ⭐ OPEN 交易的 AvgCost 是開倉後的平均成本
+    if (trade.avgCost > 0) {
       costBasisData.push({
         time: timeInSeconds as UTCTimestamp,
-        value: avgCost,
+        value: trade.avgCost,
       });
     }
   }

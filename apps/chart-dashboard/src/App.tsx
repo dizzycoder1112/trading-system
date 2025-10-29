@@ -72,7 +72,12 @@ function App() {
 
         {/* K 線圖表 */}
         <div style={styles.chartContainer}>
-          <CandlestickChart data={candles} markers={markers} costBasisLine={costBasisLine} />
+          <CandlestickChart
+            data={candles}
+            trades={trades}
+            markers={markers}
+            costBasisLine={costBasisLine}
+          />
         </div>
 
         {/* 提示信息 */}

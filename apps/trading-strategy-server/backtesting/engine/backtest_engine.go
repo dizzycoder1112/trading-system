@@ -128,12 +128,17 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		currentTime := currentCandle.Timestamp()
 
 		// ========== 步驟 1: 檢查是否需要平倉 ==========
+		// ⭐ 在平倉循環開始前，先計算當前時刻的平均成本（所有同一時間的平倉都使用這個值）
+		avgCostAtThisTime := e.positionTracker.CalculateAverageCost()
+
+		// ⭐ 重要：先複製倉位列表，避免在循環中修改導致跳過某些倉位
+		positionsToCheck := make([]simulator.Position, len(e.positionTracker.GetOpenPositions()))
+		copy(positionsToCheck, e.positionTracker.GetOpenPositions())
+
 		// 注意：先檢查平倉，再考慮開倉（避免資金不足）
-		for _, pos := range e.positionTracker.GetOpenPositions() {
+		for _, pos := range positionsToCheck {
 			// 檢查是否觸及目標平倉價格
 			if currentPrice.Value() >= pos.TargetClosePrice {
-				// ⭐ 在平倉之前，先計算當前的平均成本（包含這個即將平倉的倉位）
-				avgCostBeforeClose := e.positionTracker.CalculateAverageCost()
 
 				// 模擬平倉
 				closedPos, revenue, err := e.simulator.SimulateClose(pos, currentPrice.Value(), currentTime)
@@ -147,13 +152,13 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				pnlPercent := (priceChange / pos.EntryPrice) * 100     // 百分比
 				pnlAmount := pos.Size * (priceChange / pos.EntryPrice) // 金額（未扣手續費）
 
-				// ⭐ 計算基於平均成本的盈虧（新增邏輯）
-				priceChange_Avg := closedPos.ClosePrice - avgCostBeforeClose
+				// ⭐ 計算基於平均成本的盈虧（使用這個時刻的平均成本）
+				priceChange_Avg := closedPos.ClosePrice - avgCostAtThisTime
 				pnlPercent_Avg := 0.0
 				pnlAmount_Avg := 0.0
-				if avgCostBeforeClose > 0 {
-					pnlPercent_Avg = (priceChange_Avg / avgCostBeforeClose) * 100
-					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostBeforeClose)
+				if avgCostAtThisTime > 0 {
+					pnlPercent_Avg = (priceChange_Avg / avgCostAtThisTime) * 100
+					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostAtThisTime)
 				}
 
 				// ⭐ 計算平倉時的實際價值和手續費
@@ -191,7 +196,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
 
-				// ⭐ 記錄平倉日誌
+				// ⭐ 記錄平倉日誌（使用這個時刻的平均成本，所有同時平倉的倉位都使用相同值）
 				tradeCounter++
 				e.tradeLog = append(e.tradeLog, TradeLog{
 					TradeID:           tradeCounter,
@@ -203,7 +208,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					OpenPositionValue: openPositionValue,  // ⭐ 平倉後的累計持倉價值
 					PnLPercent:        pnlPercent,         // ⭐ 基於單筆開倉價的盈虧百分比
 					PnL:               pnlAmount,          // ⭐ 基於單筆開倉價的盈虧金額（未扣手續費）
-					AvgCost:           avgCostBeforeClose, // ⭐ 平倉時的平均成本
+					AvgCost:           avgCostAtThisTime,  // ⭐ 這個時刻的平均成本（平倉前的狀態）
 					PnLPercent_Avg:    pnlPercent_Avg,    // ⭐ 基於平均成本的盈虧百分比
 					PnL_Avg:           pnlAmount_Avg,     // ⭐ 基於平均成本的盈虧金額（未扣手續費）
 					Fee:               closeFee,           // ⭐ 平倉手續費（基於實際價值）
@@ -258,10 +263,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		if !gridAdvice.ShouldOpen && len(gridAdvice.Reason) >= 16 &&
 		   gridAdvice.Reason[:16] == "break_even_exit:" {
 			// ⭐ 觸發打平機制：平掉所有未平倉位
-			for _, pos := range e.positionTracker.GetOpenPositions() {
-				// ⭐ 在平倉之前，先計算當前的平均成本
-				avgCostBeforeClose := e.positionTracker.CalculateAverageCost()
+			// ⭐ 重要：先複製倉位列表，避免在循環中修改導致跳過某些倉位
+			positionsToClose := make([]simulator.Position, len(e.positionTracker.GetOpenPositions()))
+			copy(positionsToClose, e.positionTracker.GetOpenPositions())
 
+			for _, pos := range positionsToClose {
 				// 以當前價格平倉
 				closedPos, revenue, err := e.simulator.SimulateClose(pos, currentPrice.Value(), currentTime)
 				if err != nil {
@@ -273,13 +279,13 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				pnlPercent := (priceChange / pos.EntryPrice) * 100
 				pnlAmount := pos.Size * (priceChange / pos.EntryPrice)
 
-				// ⭐ 計算基於平均成本的盈虧（新增邏輯）
-				priceChange_Avg := closedPos.ClosePrice - avgCostBeforeClose
+				// ⭐ 計算基於平均成本的盈虧（使用這個時刻的平均成本）
+				priceChange_Avg := closedPos.ClosePrice - avgCostAtThisTime
 				pnlPercent_Avg := 0.0
 				pnlAmount_Avg := 0.0
-				if avgCostBeforeClose > 0 {
-					pnlPercent_Avg = (priceChange_Avg / avgCostBeforeClose) * 100
-					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostBeforeClose)
+				if avgCostAtThisTime > 0 {
+					pnlPercent_Avg = (priceChange_Avg / avgCostAtThisTime) * 100
+					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostAtThisTime)
 				}
 
 				// ⭐ 計算平倉時的實際價值和手續費
@@ -317,7 +323,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
 
-				// ⭐ 記錄平倉日誌
+				// ⭐ 記錄平倉日誌（使用這個時刻的平均成本）
 				tradeCounter++
 				e.tradeLog = append(e.tradeLog, TradeLog{
 					TradeID:           tradeCounter,
@@ -329,7 +335,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					OpenPositionValue: openPositionValue,  // ⭐ 平倉後的累計持倉價值
 					PnLPercent:        pnlPercent,         // ⭐ 基於單筆開倉價的盈虧百分比
 					PnL:               pnlAmount,          // ⭐ 基於單筆開倉價的盈虧金額
-					AvgCost:           avgCostBeforeClose, // ⭐ 平倉時的平均成本
+					AvgCost:           avgCostAtThisTime,  // ⭐ 這個時刻的平均成本（打平前的狀態）
 					PnLPercent_Avg:    pnlPercent_Avg,    // ⭐ 基於平均成本的盈虧百分比
 					PnL_Avg:           pnlAmount_Avg,     // ⭐ 基於平均成本的盈虧金額
 					Fee:               closeFee,
@@ -387,6 +393,9 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
 
+				// ⭐ 計算開倉後的平均成本
+				avgCostAfterOpen := e.positionTracker.CalculateAverageCost()
+
 				// ⭐ 記錄開倉日誌
 				tradeCounter++
 				e.tradeLog = append(e.tradeLog, TradeLog{
@@ -397,6 +406,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					PositionSize:      position.Size,
 					Balance:           balance,
 					OpenPositionValue: openPositionValue, // ⭐ 開倉後的累計持倉價值
+					AvgCost:           avgCostAfterOpen,  // ⭐ 開倉後的平均成本
 					PnL:               0,
 					Fee:               openFee, // ⭐ 記錄開倉手續費
 					Reason:            gridAdvice.Reason,
