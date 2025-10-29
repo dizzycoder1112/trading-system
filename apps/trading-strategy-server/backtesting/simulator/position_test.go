@@ -37,13 +37,21 @@ func TestPositionTracker_CalculateAverageCost(t *testing.T) {
 	tracker := NewPositionTracker()
 
 	// 添加兩個持倉
-	tracker.AddPosition(2500, 200, time.Now(), 2510) // 成本: 2500 * 200 = 500000
-	tracker.AddPosition(2600, 200, time.Now(), 2615) // 成本: 2600 * 200 = 520000
+	// 倉位 #1: $200 @ $2500 → 持有 200/2500 = 0.08 幣
+	// 倉位 #2: $200 @ $2600 → 持有 200/2600 = 0.0769 幣
+	tracker.AddPosition(2500, 200, time.Now(), 2510)
+	tracker.AddPosition(2600, 200, time.Now(), 2615)
 
 	avgCost := tracker.CalculateAverageCost()
-	expected := (500000.0 + 520000.0) / (200.0 + 200.0) // = 1020000 / 400 = 2550
 
-	if avgCost != expected {
+	// 正確計算方式：
+	// 總花費 = 200 + 200 = 400 USDT
+	// 總持倉量 = (200/2500) + (200/2600) = 0.08 + 0.0769 = 0.1569 幣
+	// 平均成本 = 400 / 0.1569 ≈ 2549.02
+	expected := 2549.02
+
+	// 允許浮點誤差
+	if diff := avgCost - expected; diff > 0.01 || diff < -0.01 {
 		t.Errorf("Expected average cost %.2f, got %.2f", expected, avgCost)
 	}
 

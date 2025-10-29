@@ -58,10 +58,12 @@ func main() {
 	instID := cfg.Strategy.Instruments[0]
 	gridAggregate, err := grid.NewGridAggregate(
 		grid.GridConfig{
-			InstID:        instID,
-			PositionSize:  positionSize, // 固定單次開倉大小為 200 美元
-			TakeProfitMin: cfg.Strategy.Grid.TakeProfitMin,
-			TakeProfitMax: cfg.Strategy.Grid.TakeProfitMax,
+			InstID:             instID,
+			PositionSize:       positionSize, // 固定單次開倉大小為 200 美元
+			TakeProfitRateMin:  cfg.Strategy.Grid.TakeProfitMin,
+			TakeProfitRateMax:  cfg.Strategy.Grid.TakeProfitMax,
+			BreakEvenProfitMin: 0,
+			BreakEvenProfitMax: 20,
 		})
 	if err != nil {
 		log.Error("Failed to create grid aggregate", map[string]any{"error": err})
@@ -69,10 +71,12 @@ func main() {
 	}
 
 	log.Info("Grid aggregate created", map[string]any{
-		"instId":        gridAggregate.InstID,
-		"positionSize":  gridAggregate.PositionSize,
-		"takeProfitMin": gridAggregate.TakeProfitMin,
-		"takeProfitMax": gridAggregate.TakeProfitMax,
+		"instId":             gridAggregate.InstID,
+		"positionSize":       gridAggregate.PositionSize,
+		"TakeProfitRateMin":  gridAggregate.TakeProfitRateMin,
+		"TakeProfitRateMax":  gridAggregate.TakeProfitRateMax,
+		"BreakEvenProfitMin": gridAggregate.BreakEvenProfitMin,
+		"BreakEvenProfitMax": gridAggregate.BreakEvenProfitMax,
 	})
 
 	// 6. 創建應用層 - StrategyService ⭐

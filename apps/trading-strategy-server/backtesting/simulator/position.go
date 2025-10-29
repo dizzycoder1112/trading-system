@@ -144,15 +144,18 @@ func (pt *PositionTracker) CalculateAverageCost() float64 {
 		return 0
 	}
 
-	totalCost := 0.0
-	totalSize := 0.0
+	totalCost := 0.0        // 總花費（USDT）
+	totalCoinAmount := 0.0  // 總持倉量（幣數）
 
 	for _, pos := range pt.openPositions {
-		totalCost += pos.EntryPrice * pos.Size
-		totalSize += pos.Size
+		// pos.Size 是 USDT 金額，需要除以 EntryPrice 得到幣的數量
+		coinAmount := pos.Size / pos.EntryPrice
+		totalCoinAmount += coinAmount
+		totalCost += pos.Size
 	}
 
-	return totalCost / totalSize
+	// 平均成本 = 總花費 / 總持倉量（幣數）
+	return totalCost / totalCoinAmount
 }
 
 // CalculateUnrealizedPnL 計算未實現盈虧

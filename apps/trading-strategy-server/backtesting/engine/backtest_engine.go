@@ -14,13 +14,15 @@ import (
 
 // BacktestConfig 回測配置
 type BacktestConfig struct {
-	InitialBalance float64 // 初始資金
-	FeeRate        float64 // 手續費率（默認: 0.0005 = 0.05%）
-	Slippage       float64 // 滑點（默認: 0）
-	InstID         string  // 交易對 (e.g., "ETH-USDT-SWAP")
-	TakeProfitMin  float64 // 最小停利百分比
-	TakeProfitMax  float64 // 最大停利百分比
-	PositionSize   float64 // 單次開倉大小 (USDT)
+	InitialBalance     float64 // 初始資金
+	FeeRate            float64 // 手續費率（默認: 0.0005 = 0.05%）
+	Slippage           float64 // 滑點（默認: 0）
+	InstID             string  // 交易對 (e.g., "ETH-USDT-SWAP")
+	TakeProfitMin      float64 // 最小停利百分比
+	TakeProfitMax      float64 // 最大停利百分比
+	PositionSize       float64 // 單次開倉大小 (USDT)
+	BreakEvenProfitMin float64 // 打平最小目標盈利（USDT）⭐
+	BreakEvenProfitMax float64 // 打平最大目標盈利（USDT）⭐
 }
 
 // BacktestEngine 回測引擎核心
@@ -35,27 +37,33 @@ type BacktestEngine struct {
 
 // TradeLog 交易日誌（用於 debug）
 type TradeLog struct {
-	TradeID      int       // 交易序號
-	Time         time.Time // 時間
-	Action       string    // OPEN / CLOSE
-	Price        float64   // 價格
-	PositionSize float64   // 倉位大小
-	Balance      float64   // 當前餘額
-	PnLPercent   float64   // 盈虧百分比（僅平倉時）⭐
-	PnL          float64   // 盈虧金額（僅平倉時，未扣手續費）⭐
-	Fee          float64   // 手續費 ⭐
-	Reason       string    // 原因
-	PositionID   string    // 倉位ID（關聯開倉和平倉）⭐
+	TradeID            int       // 交易序號
+	Time               time.Time // 時間
+	Action             string    // OPEN / CLOSE
+	Price              float64   // 價格
+	PositionSize       float64   // 倉位大小
+	Balance            float64   // 當前餘額
+	OpenPositionValue  float64   // 累計持倉總價值（USDT）⭐ 新增
+	PnLPercent         float64   // 盈虧百分比（基於單筆開倉價）⭐
+	PnL                float64   // 盈虧金額（基於單筆開倉價，未扣手續費）⭐
+	AvgCost            float64   // 平倉時的平均成本（所有未平倉的加權平均）⭐
+	PnLPercent_Avg     float64   // 基於平均成本的盈虧百分比 ⭐
+	PnL_Avg            float64   // 基於平均成本的盈虧金額（未扣手續費）⭐
+	Fee                float64   // 手續費 ⭐
+	Reason             string    // 原因
+	PositionID         string    // 倉位ID（關聯開倉和平倉）⭐
 }
 
 // NewBacktestEngine 創建回測引擎
 func NewBacktestEngine(config BacktestConfig) (*BacktestEngine, error) {
 	// 1. 創建真實的 Grid 策略 ⭐
 	strategy, err := grid.NewGridAggregate(grid.GridConfig{
-		InstID:        config.InstID,
-		PositionSize:  config.PositionSize,
-		TakeProfitMin: config.TakeProfitMin,
-		TakeProfitMax: config.TakeProfitMax,
+		InstID:             config.InstID,
+		PositionSize:       config.PositionSize,
+		TakeProfitRateMin:  config.TakeProfitMin,
+		TakeProfitRateMax:  config.TakeProfitMax,
+		BreakEvenProfitMin: config.BreakEvenProfitMin, // ⭐ 從配置讀取
+		BreakEvenProfitMax: config.BreakEvenProfitMax, // ⭐ 從配置讀取
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create grid strategy: %w", err)
@@ -100,6 +108,16 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 	balance := e.config.InitialBalance
 	tradeCounter := 0 // 交易計數器
 
+	// ⭐ 追蹤統計數據
+	totalOpenedTrades := 0   // 總開倉數量
+	totalProfitGross := 0.0  // 總利潤（未扣手續費）
+	totalFeesOpen := 0.0     // 開倉總手續費
+	totalFeesClose := 0.0    // 關倉總手續費
+
+	// ⭐ 追蹤當前交易輪次數據（用於打平機制）
+	openPositionValue := 0.0          // 累計持倉總價值（USDT）
+	currentRoundRealizedPnL := 0.0    // 當前輪次已實現盈虧（未扣手續費）
+
 	// 記錄初始資金
 	e.calculator.RecordBalance(candles[0].Timestamp(), balance)
 
@@ -114,6 +132,9 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		for _, pos := range e.positionTracker.GetOpenPositions() {
 			// 檢查是否觸及目標平倉價格
 			if currentPrice.Value() >= pos.TargetClosePrice {
+				// ⭐ 在平倉之前，先計算當前的平均成本（包含這個即將平倉的倉位）
+				avgCostBeforeClose := e.positionTracker.CalculateAverageCost()
+
 				// 模擬平倉
 				closedPos, revenue, err := e.simulator.SimulateClose(pos, currentPrice.Value(), currentTime)
 				if err != nil {
@@ -121,13 +142,22 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					continue
 				}
 
-				// ⭐ 計算純粹的價差盈虧（不扣手續費）
+				// ⭐ 計算基於單筆開倉價的盈虧（原有邏輯）
 				priceChange := closedPos.ClosePrice - pos.EntryPrice
-				pnlPercent := (priceChange / pos.EntryPrice) * 100 // 百分比
+				pnlPercent := (priceChange / pos.EntryPrice) * 100     // 百分比
 				pnlAmount := pos.Size * (priceChange / pos.EntryPrice) // 金額（未扣手續費）
 
+				// ⭐ 計算基於平均成本的盈虧（新增邏輯）
+				priceChange_Avg := closedPos.ClosePrice - avgCostBeforeClose
+				pnlPercent_Avg := 0.0
+				pnlAmount_Avg := 0.0
+				if avgCostBeforeClose > 0 {
+					pnlPercent_Avg = (priceChange_Avg / avgCostBeforeClose) * 100
+					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostBeforeClose)
+				}
+
 				// ⭐ 計算平倉時的實際價值和手續費
-				closeValue := pos.Size + pnlAmount // 平倉時的總價值（本金 + 盈虧）
+				closeValue := pos.Size + pnlAmount        // 平倉時的總價值（本金 + 盈虧）
 				closeFee := closeValue * e.config.FeeRate // 平倉手續費基於總價值
 
 				// 更新倉位追蹤器
@@ -144,23 +174,41 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				// 更新餘額
 				balance += revenue
 
+				// ⭐ 累加統計數據
+				totalProfitGross += pnlAmount  // 累加未扣費盈虧
+				totalFeesClose += closeFee     // 累加關倉手續費
+
+				// ⭐ 更新當前交易輪次數據
+				openPositionValue -= pos.Size                // 減少累計持倉價值
+				currentRoundRealizedPnL += pnlAmount         // 累加當前輪次已實現盈虧
+
+				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）
+				if openPositionValue <= 0.01 { // 使用小值避免浮點誤差
+					openPositionValue = 0
+					currentRoundRealizedPnL = 0 // 重置，開始新的交易輪次
+				}
+
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
 
 				// ⭐ 記錄平倉日誌
 				tradeCounter++
 				e.tradeLog = append(e.tradeLog, TradeLog{
-					TradeID:      tradeCounter,
-					Time:         currentTime,
-					Action:       "CLOSE",
-					Price:        closedPos.ClosePrice,
-					PositionSize: closeValue,  // ⭐ 平倉時的實際收回金額（含盈虧）
-					Balance:      balance,
-					PnLPercent:   pnlPercent, // ⭐ 盈虧百分比
-					PnL:          pnlAmount,   // ⭐ 盈虧金額（未扣手續費）
-					Fee:          closeFee,    // ⭐ 平倉手續費（基於實際價值）
-					Reason:       fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
-					PositionID:   pos.ID, // ⭐ 記錄倉位ID
+					TradeID:           tradeCounter,
+					Time:              currentTime,
+					Action:            "CLOSE",
+					Price:             closedPos.ClosePrice,
+					PositionSize:      closeValue,         // ⭐ 平倉時的實際收回金額（含盈虧）
+					Balance:           balance,
+					OpenPositionValue: openPositionValue,  // ⭐ 平倉後的累計持倉價值
+					PnLPercent:        pnlPercent,         // ⭐ 基於單筆開倉價的盈虧百分比
+					PnL:               pnlAmount,          // ⭐ 基於單筆開倉價的盈虧金額（未扣手續費）
+					AvgCost:           avgCostBeforeClose, // ⭐ 平倉時的平均成本
+					PnLPercent_Avg:    pnlPercent_Avg,    // ⭐ 基於平均成本的盈虧百分比
+					PnL_Avg:           pnlAmount_Avg,     // ⭐ 基於平均成本的盈虧金額（未扣手續費）
+					Fee:               closeFee,           // ⭐ 平倉手續費（基於實際價值）
+					Reason:            fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
+					PositionID:        pos.ID, // ⭐ 記錄倉位ID
 				})
 			}
 		}
@@ -183,8 +231,113 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			lastCandle = currentCandle
 		}
 
-		// 獲取開倉建議（grid.OpenAdvice）
-		gridAdvice := e.strategy.GetOpenAdvice(currentPrice, lastCandle, histories)
+		// ========== 步驟 2.5: 計算當前倉位摘要 ⭐ ==========
+		// 計算已支付的總手續費（從交易日誌）
+		totalFeesPaid := e.GetTotalFees()
+
+		// 獲取當前未平倉信息
+		openPositions := e.positionTracker.GetOpenPositions()
+		openCount := len(openPositions)
+		totalSize := e.positionTracker.GetTotalSize()
+		avgCost := e.positionTracker.CalculateAverageCost()
+
+		// 創建倉位摘要（包含當前輪次已實現盈虧）⭐
+		positionSummary := value_objects.NewPositionSummary(
+			openCount,
+			totalSize,
+			avgCost,
+			totalFeesPaid,
+			currentRoundRealizedPnL, // ⭐ 傳入當前輪次已實現盈虧
+		)
+
+		// 獲取開倉建議（grid.OpenAdvice）⭐ 傳入倉位摘要
+		gridAdvice := e.strategy.GetOpenAdvice(currentPrice, lastCandle, histories, positionSummary)
+
+		// ========== 步驟 2.8: 檢查是否觸發打平機制 ⭐ ==========
+		// 即使不應該開倉，也要檢查是否因為打平退出
+		if !gridAdvice.ShouldOpen && len(gridAdvice.Reason) >= 16 &&
+		   gridAdvice.Reason[:16] == "break_even_exit:" {
+			// ⭐ 觸發打平機制：平掉所有未平倉位
+			for _, pos := range e.positionTracker.GetOpenPositions() {
+				// ⭐ 在平倉之前，先計算當前的平均成本
+				avgCostBeforeClose := e.positionTracker.CalculateAverageCost()
+
+				// 以當前價格平倉
+				closedPos, revenue, err := e.simulator.SimulateClose(pos, currentPrice.Value(), currentTime)
+				if err != nil {
+					continue
+				}
+
+				// ⭐ 計算基於單筆開倉價的盈虧（原有邏輯）
+				priceChange := closedPos.ClosePrice - pos.EntryPrice
+				pnlPercent := (priceChange / pos.EntryPrice) * 100
+				pnlAmount := pos.Size * (priceChange / pos.EntryPrice)
+
+				// ⭐ 計算基於平均成本的盈虧（新增邏輯）
+				priceChange_Avg := closedPos.ClosePrice - avgCostBeforeClose
+				pnlPercent_Avg := 0.0
+				pnlAmount_Avg := 0.0
+				if avgCostBeforeClose > 0 {
+					pnlPercent_Avg = (priceChange_Avg / avgCostBeforeClose) * 100
+					pnlAmount_Avg = pos.Size * (priceChange_Avg / avgCostBeforeClose)
+				}
+
+				// ⭐ 計算平倉時的實際價值和手續費
+				closeValue := pos.Size + pnlAmount
+				closeFee := closeValue * e.config.FeeRate
+
+				// 更新倉位追蹤器
+				err = e.positionTracker.ClosePosition(
+					pos.ID,
+					closedPos.ClosePrice,
+					closedPos.CloseTime,
+					closedPos.RealizedPnL,
+				)
+				if err != nil {
+					continue
+				}
+
+				// 更新餘額
+				balance += revenue
+
+				// ⭐ 累加統計數據
+				totalProfitGross += pnlAmount
+				totalFeesClose += closeFee
+
+				// ⭐ 更新當前交易輪次數據
+				openPositionValue -= pos.Size                // 減少累計持倉價值
+				currentRoundRealizedPnL += pnlAmount         // 累加當前輪次已實現盈虧
+
+				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）
+				if openPositionValue <= 0.01 { // 使用小值避免浮點誤差
+					openPositionValue = 0
+					currentRoundRealizedPnL = 0 // 重置，開始新的交易輪次
+				}
+
+				// 記錄資金快照
+				e.calculator.RecordBalance(currentTime, balance)
+
+				// ⭐ 記錄平倉日誌
+				tradeCounter++
+				e.tradeLog = append(e.tradeLog, TradeLog{
+					TradeID:           tradeCounter,
+					Time:              currentTime,
+					Action:            "CLOSE",
+					Price:             closedPos.ClosePrice,
+					PositionSize:      closeValue,
+					Balance:           balance,
+					OpenPositionValue: openPositionValue,  // ⭐ 平倉後的累計持倉價值
+					PnLPercent:        pnlPercent,         // ⭐ 基於單筆開倉價的盈虧百分比
+					PnL:               pnlAmount,          // ⭐ 基於單筆開倉價的盈虧金額
+					AvgCost:           avgCostBeforeClose, // ⭐ 平倉時的平均成本
+					PnLPercent_Avg:    pnlPercent_Avg,    // ⭐ 基於平均成本的盈虧百分比
+					PnL_Avg:           pnlAmount_Avg,     // ⭐ 基於平均成本的盈虧金額
+					Fee:               closeFee,
+					Reason:            gridAdvice.Reason, // ⭐ 記錄打平退出原因
+					PositionID:        pos.ID,
+				})
+			}
+		}
 
 		// ========== 步驟 3: 如果建議開倉，模擬開倉 ==========
 		if gridAdvice.ShouldOpen {
@@ -199,7 +352,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					OpenPrice:    gridAdvice.OpenPrice,
 					ClosePrice:   gridAdvice.ClosePrice,
 					PositionSize: gridAdvice.PositionSize,
-					TakeProfit:   gridAdvice.TakeProfit,
+					TakeProfit:   gridAdvice.TakeProfitRate,
 					Reason:       gridAdvice.Reason,
 				}
 
@@ -224,22 +377,30 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				// 更新餘額
 				balance -= cost
 
+				// ⭐ 累加統計數據
+				totalOpenedTrades++         // 累加開倉數量
+				totalFeesOpen += openFee    // 累加開倉手續費
+
+				// ⭐ 更新當前交易輪次數據
+				openPositionValue += position.Size  // 增加累計持倉價值
+
 				// 記錄資金快照
 				e.calculator.RecordBalance(currentTime, balance)
 
 				// ⭐ 記錄開倉日誌
 				tradeCounter++
 				e.tradeLog = append(e.tradeLog, TradeLog{
-					TradeID:      tradeCounter,
-					Time:         currentTime,
-					Action:       "OPEN",
-					Price:        position.EntryPrice,
-					PositionSize: position.Size,
-					Balance:      balance,
-					PnL:          0,
-					Fee:          openFee, // ⭐ 記錄開倉手續費
-					Reason:       gridAdvice.Reason,
-					PositionID:   newPosition.ID, // ⭐ 記錄倉位ID
+					TradeID:           tradeCounter,
+					Time:              currentTime,
+					Action:            "OPEN",
+					Price:             position.EntryPrice,
+					PositionSize:      position.Size,
+					Balance:           balance,
+					OpenPositionValue: openPositionValue, // ⭐ 開倉後的累計持倉價值
+					PnL:               0,
+					Fee:               openFee, // ⭐ 記錄開倉手續費
+					Reason:            gridAdvice.Reason,
+					PositionID:        newPosition.ID, // ⭐ 記錄倉位ID
 				})
 			}
 		}
@@ -254,7 +415,15 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 	e.calculator.RecordBalance(lastTime, balance)
 
 	// ========== 步驟 5: 計算回測指標（包含未實現盈虧）==========
-	result := e.calculator.Calculate(e.positionTracker, balance, lastPrice)
+	result := e.calculator.Calculate(
+		e.positionTracker,
+		balance,
+		lastPrice,
+		totalOpenedTrades,
+		totalProfitGross,
+		totalFeesOpen,
+		totalFeesClose,
+	)
 
 	return result, nil
 }
@@ -305,19 +474,23 @@ func (e *BacktestEngine) GetTotalFees() float64 {
 
 // ExportTradeLogCSV 導出交易日誌到 CSV 文件
 func (e *BacktestEngine) ExportTradeLogCSV(filepath string) error {
-	content := "TradeID,Time,Action,Price,PositionSize,Balance,PnL%,PnL,Fee,Reason,PositionID\n"
+	content := "TradeID,Time,Action,Price,PositionSize,Balance,OpenPositionValue,PnL%,PnL,AvgCost,PnL%_Avg,PnL_Avg,Fee,Reason,PositionID\n"
 
 	for _, log := range e.tradeLog {
-		line := fmt.Sprintf("%d,%s,%s,%.2f,%.2f,%.2f,%.4f,%.2f,%.8f,%s,%s\n",
+		line := fmt.Sprintf("%d,%s,%s,%.2f,%.2f,%.2f,%.2f,%.4f,%.2f,%.2f,%.4f,%.2f,%.8f,%s,%s\n",
 			log.TradeID,
-			log.Time.Format("2006-01-02 15:04:05"),
+			log.Time.UTC().Format("2006-01-02 15:04:05"), // ⭐ 使用 UTC 時間（GMT+0）
 			log.Action,
-			log.Price,        // 價格：2位小數
-			log.PositionSize, // 倉位大小：2位小數
-			log.Balance,      // 餘額：2位小數
-			log.PnLPercent,   // ⭐ 盈虧百分比：4位小數（例如：0.2145%）
-			log.PnL,          // ⭐ 盈虧金額：2位小數（未扣手續費）
-			log.Fee,          // ⭐ 手續費：8位小數（與OKX一致）
+			log.Price,             // 價格：2位小數
+			log.PositionSize,      // 倉位大小：2位小數
+			log.Balance,           // 餘額：2位小數
+			log.OpenPositionValue, // ⭐ 累計持倉總價值：2位小數
+			log.PnLPercent,        // ⭐ 盈虧百分比（基於單筆）：4位小數
+			log.PnL,               // ⭐ 盈虧金額（基於單筆）：2位小數
+			log.AvgCost,           // ⭐ 平均成本：2位小數
+			log.PnLPercent_Avg,    // ⭐ 盈虧百分比（基於平均）：4位小數
+			log.PnL_Avg,           // ⭐ 盈虧金額（基於平均）：2位小數
+			log.Fee,               // ⭐ 手續費：8位小數
 			log.Reason,
 			log.PositionID,
 		)

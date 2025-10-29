@@ -11,21 +11,23 @@ import (
 
 // GridConfig 網格策略配置
 type GridConfig struct {
-	InstID        string  // 交易對
-	PositionSize  float64 // 單次開倉大小（美元）
-	TakeProfitMin float64 // 最小停利百分比
-	TakeProfitMax float64 // 最大停利百分比
+	InstID             string  // 交易對
+	PositionSize       float64 // 單次開倉大小（美元）
+	TakeProfitRateMin  float64 // 最小停利比例（例: 0.0015 = 0.15%）
+	TakeProfitRateMax  float64 // 最大停利比例（例: 0.002 = 0.2%）
+	BreakEvenProfitMin float64 // 盈虧平衡最小目標盈利（USDT）
+	BreakEvenProfitMax float64 // 盈虧平衡最大目標盈利（USDT）
 }
 
 // OpenAdvice 開倉建議（領域值對象）
 type OpenAdvice struct {
-	ShouldOpen   bool // 是否應該開倉
-	CurrentPrice string
-	OpenPrice    string  // 建議開倉價格（精確字符串，例: "3889.94"）
-	ClosePrice   string  // 建議平倉價格（精確字符串，例: "3895.78"）
-	PositionSize float64 // 建議倉位大小（美元）
-	TakeProfit   float64 // 建議停利百分比
-	Reason       string  // 原因
+	ShouldOpen     bool    // 是否應該開倉
+	CurrentPrice   string  // 當前價格
+	OpenPrice      string  // 建議開倉價格（精確字符串，例: "3889.94"）
+	ClosePrice     string  // 建議平倉價格（精確字符串，例: "3895.78"）
+	PositionSize   float64 // 建議倉位大小（美元）
+	TakeProfitRate float64 // 建議停利比例（例: 0.0015 = 0.15%）
+	Reason         string  // 原因
 }
 
 // GridAggregate 網格聚合根（無狀態設計）⭐
@@ -35,31 +37,43 @@ type OpenAdvice struct {
 // 3. 無狀態：不記錄 lastCandle（改為參數傳入）
 // 4. 不依賴任何技術實現
 type GridAggregate struct {
-	InstID        string
-	PositionSize  float64 // 單次開倉大小（美元）
-	TakeProfitMin float64 // 最小停利百分比
-	TakeProfitMax float64 // 最大停利百分比
-	Calculator    *GridCalculator
+	InstID             string
+	PositionSize       float64 // 單次開倉大小（美元）
+	TakeProfitRateMin  float64 // 最小停利比例（例: 0.0015 = 0.15%）
+	TakeProfitRateMax  float64 // 最大停利比例（例: 0.002 = 0.2%）
+	BreakEvenProfitMin float64 // 盈虧平衡最小目標盈利（USDT）
+	BreakEvenProfitMax float64 // 盈虧平衡最大目標盈利（USDT）
+	Calculator         *GridCalculator
 	// ❌ 移除 lastCandle（改為參數傳入，無狀態設計）
 }
 
 // NewGridAggregate 創建網格聚合根（工廠方法）
 func NewGridAggregate(config GridConfig) (*GridAggregate, error) {
 	// 驗證業務規則
-	if config.TakeProfitMin <= 0 || config.TakeProfitMax <= 0 {
-		return nil, errors.New("take profit must be positive")
+	if config.TakeProfitRateMin <= 0 || config.TakeProfitRateMax <= 0 {
+		return nil, errors.New("take profit rate must be positive")
 	}
 
-	if config.TakeProfitMin > config.TakeProfitMax {
-		return nil, errors.New("take profit min must be <= max")
+	if config.TakeProfitRateMin > config.TakeProfitRateMax {
+		return nil, errors.New("take profit rate min must be <= max")
+	}
+
+	if config.BreakEvenProfitMin < 0 || config.BreakEvenProfitMax < 0 {
+		return nil, errors.New("break even profit must be non-negative")
+	}
+
+	if config.BreakEvenProfitMin > config.BreakEvenProfitMax {
+		return nil, errors.New("break even profit min must be <= max")
 	}
 
 	return &GridAggregate{
-		InstID:        config.InstID,
-		PositionSize:  config.PositionSize,
-		TakeProfitMin: config.TakeProfitMin,
-		TakeProfitMax: config.TakeProfitMax,
-		Calculator:    NewGridCalculator(),
+		InstID:             config.InstID,
+		PositionSize:       config.PositionSize,
+		TakeProfitRateMin:  config.TakeProfitRateMin,
+		TakeProfitRateMax:  config.TakeProfitRateMax,
+		BreakEvenProfitMin: config.BreakEvenProfitMin,
+		BreakEvenProfitMax: config.BreakEvenProfitMax,
+		Calculator:         NewGridCalculator(),
 	}, nil
 }
 
@@ -67,46 +81,53 @@ func NewGridAggregate(config GridConfig) (*GridAggregate, error) {
 // 參數：
 //   - currentPrice: 當前價格（Order Service 提供）
 //   - lastCandle: 上一根 K 線（從 Redis 讀取）
+//   - candleHistories: K線歷史數據
+//   - positionSummary: 當前持倉摘要（用於盈虧平衡判斷）⭐ 新增
 //
 // 返回：OpenAdvice（開倉建議）
 func (g *GridAggregate) GetOpenAdvice(
 	currentPrice value_objects.Price,
 	lastCandle value_objects.Candle,
 	candleHistories []value_objects.Candle,
+	positionSummary value_objects.PositionSummary,
 ) OpenAdvice {
-	// 計算開倉位置：上一根 K 線的 MidLow
-	// midLow := lastCandle.MidLow()
+	// ========== 步驟 1: 檢查盈虧平衡退出 ⭐ ==========
+	// 如果有未平倉位，優先檢查是否應該盈虧平衡退出
+	if !positionSummary.IsEmpty() {
+		feeRate := 0.0005 // OKX Taker 手續費率
 
-	// 判斷：當前價格是否 <= MidLow
-	// if currentPrice.IsBelowOrEqual(midLow) {
-	// 	// 應該開倉
-	// 	takeProfit := (g.takeProfitMin + g.takeProfitMax) / 2.0
+		// 判斷是否應該盈虧平衡退出
+		shouldExit, expectedProfit := positionSummary.ShouldBreakEven(
+			currentPrice.Value(),
+			feeRate,
+			g.BreakEvenProfitMin,
+			g.BreakEvenProfitMax,
+		)
 
-	// 	return OpenAdvice{
-	// 		ShouldOpen:   true,
-	// 		Price:        midLow.Value(),
-	// 		PositionSize: g.positionSize,
-	// 		TakeProfit:   takeProfit,
-	// 		Reason:       fmt.Sprintf("hit_mid_low_%.2f", midLow.Value()),
-	// 	}
-	// }
+		if shouldExit {
+			// 應該盈虧平衡退出 - 不開新倉
+			return OpenAdvice{
+				ShouldOpen: false,
+				Reason: fmt.Sprintf(
+					"break_even_exit: expected_profit=%.2f USDT (target: %.0f-%.0f USDT)",
+					expectedProfit,
+					g.BreakEvenProfitMin,
+					g.BreakEvenProfitMax,
+				),
+			}
+		}
+	}
 
-	// 不應該開倉
-	// return OpenAdvice{
-	// 	ShouldOpen: false,
-	// 	Reason:     fmt.Sprintf("price_%.2f_above_mid_low_%.2f", currentPrice.Value(), midLow.Value()),
-	// }
-
+	// ========== 步驟 2: 正常開倉邏輯 ⭐ ==========
 	// ✅ 使用 decimal 进行精确计算
 	currentPriceDecimal := decimal.NewFromFloat(currentPrice.Value())
 
 	// 策略参数
-	openDiscount := 0.001 // 开仓折扣：0.1%（在低于市价 0.1% 处挂单）
-	takeProfit := 0.0015  // 止盈比例：0.15%（覆盖双边手续费 0.1% + 净利润 0.05%）
+	openDiscountRate := 0.001 // 开仓折扣比例：0.1%（在低于市价 0.1% 处挂单）
 
 	// 计算因子
-	openDiscountFactor := decimal.NewFromFloat(1 - openDiscount) // 1 - 0.001 = 0.999
-	takeProfitFactor := decimal.NewFromFloat(1 + takeProfit)     // 1 + 0.0015 = 1.0015
+	openDiscountFactor := decimal.NewFromFloat(1 - openDiscountRate)  // 1 - 0.001 = 0.999
+	takeProfitFactor := decimal.NewFromFloat(1 + g.TakeProfitRateMin) // 1 + 0.0015 = 1.0015
 
 	// 计算开仓价格：当前价格 * 0.999，无条件舍去到小数点第 2 位
 	openPriceDecimal := currentPriceDecimal.Mul(openDiscountFactor).Truncate(2)
@@ -118,13 +139,13 @@ func (g *GridAggregate) GetOpenAdvice(
 	closePriceDecimal = closePriceDecimal.Mul(shift).Ceil().Div(shift)
 
 	return OpenAdvice{
-		ShouldOpen:   true,
-		CurrentPrice: currentPriceDecimal.String(),
-		OpenPrice:    openPriceDecimal.String(),  // 例: "3889.94" (舍去)
-		ClosePrice:   closePriceDecimal.String(), // 例: "3895.78" (进位)
-		PositionSize: g.PositionSize,
-		TakeProfit:   takeProfit, // 0.0015 (0.15%)
-		Reason:       "simulated_advice",
+		ShouldOpen:     true,
+		CurrentPrice:   currentPriceDecimal.String(),
+		OpenPrice:      openPriceDecimal.String(),  // 例: "3889.94" (舍去)
+		ClosePrice:     closePriceDecimal.String(), // 例: "3895.78" (进位)
+		PositionSize:   g.PositionSize,
+		TakeProfitRate: g.TakeProfitRateMin, // 0.0015 (0.15%)
+		Reason:         "simulated_advice",
 	}
 }
 
@@ -139,10 +160,12 @@ func (g *GridAggregate) ProcessCandle(candle value_objects.Candle) (*value_objec
 // GetState 獲取當前狀態（用於日誌或監控）
 func (g *GridAggregate) GetState() map[string]any {
 	return map[string]any{
-		"instID":        g.InstID,
-		"positionSize":  g.PositionSize,
-		"takeProfitMin": g.TakeProfitMin,
-		"takeProfitMax": g.TakeProfitMax,
+		"instID":             g.InstID,
+		"positionSize":       g.PositionSize,
+		"takeProfitRateMin":  g.TakeProfitRateMin,
+		"takeProfitRateMax":  g.TakeProfitRateMax,
+		"breakEvenProfitMin": g.BreakEvenProfitMin,
+		"breakEvenProfitMax": g.BreakEvenProfitMax,
 	}
 }
 

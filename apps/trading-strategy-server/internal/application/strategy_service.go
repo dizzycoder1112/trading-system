@@ -90,8 +90,12 @@ func (s *StrategyService) GetOpenAdvice(
 
 	// 2. 創建價格值對象
 
-	// 3. 調用領域邏輯獲取建議
-	advice := s.grid.GetOpenAdvice(currentPrice, lastCandle, candlehistories)
+	// 3. 創建空的倉位摘要（Strategy Service 無狀態，倉位由 Order Service 管理）⭐
+	// TODO: 未來可能需要從 Order Service 獲取倉位摘要
+	emptyPositionSummary := value_objects.NewPositionSummary(0, 0, 0, 0, 0) // ⭐ 包含 currentRoundRealizedPnL
+
+	// 4. 調用領域邏輯獲取建議 ⭐ 傳入倉位摘要
+	advice := s.grid.GetOpenAdvice(currentPrice, lastCandle, candlehistories, emptyPositionSummary)
 
 	// 4. 記錄日誌
 	// if advice.ShouldOpen {
