@@ -14,15 +14,16 @@ import (
 func main() {
 	// 解析命令行參數
 	dataFile := flag.String("data", "", "歷史數據文件路徑 (必填)")
-	initialBalance := flag.Float64("initial-balance", 10000.0, "初始資金 (USDT)")
+	initialBalance := flag.Float64("initial-balance", 30000.0, "初始資金 (USDT)")
 	feeRate := flag.Float64("fee-rate", 0.0005, "手續費率 (默認: 0.0005 = 0.05%)")
-	positionSize := flag.Float64("position-size", 300.0, "單次開倉大小 (USDT)")
+	positionSize := flag.Float64("position-size", 100.0, "單次開倉大小 (USDT)")
 	slippage := flag.Float64("slippage", 0.0, "滑點 (默認: 0)")
 	instID := flag.String("inst-id", "ETH-USDT-SWAP", "交易對")
 	takeProfitMin := flag.Float64("take-profit-min", 0.0015, "最小止盈百分比 (默認: 0.0015 = 0.15%)")
-	takeProfitMax := flag.Float64("take-profit-max", 0.0020, "最大止盈百分比 (默認: 0.0020 = 0.20%)")
+	takeProfitMax := flag.Float64("take-profit-max", 0.01, "最大止盈百分比 (默認: 0.0020 = 0.20%)")
 	breakEvenProfitMin := flag.Float64("break-even-profit-min", 0.0, "打平最小目標盈利 (USDT, 默認: 0)")
 	breakEvenProfitMax := flag.Float64("break-even-profit-max", 20.0, "打平最大目標盈利 (USDT, 默認: 20)")
+	enableTrendFilter := flag.Bool("enable-trend-filter", false, "是否啟用趨勢過濾 (默認: true) ⭐")
 
 	flag.Parse()
 
@@ -56,6 +57,7 @@ func main() {
 	fmt.Printf("滑點: %.4f%%\n", *slippage*100)
 	fmt.Printf("止盈範圍: %.2f%% ~ %.2f%%\n", *takeProfitMin*100, *takeProfitMax*100)
 	fmt.Printf("打平目標: $%.2f ~ $%.2f USDT\n", *breakEvenProfitMin, *breakEvenProfitMax)
+	fmt.Printf("趨勢過濾: %v ⭐\n", *enableTrendFilter)
 	fmt.Println("========================================")
 	fmt.Println()
 
@@ -70,6 +72,7 @@ func main() {
 		PositionSize:       *positionSize,
 		BreakEvenProfitMin: *breakEvenProfitMin,
 		BreakEvenProfitMax: *breakEvenProfitMax,
+		EnableTrendFilter:  *enableTrendFilter, // ⭐ 趨勢過濾
 	}
 
 	// 創建回測引擎
@@ -117,10 +120,12 @@ func printBacktestResult(result metrics.BacktestResult, dataFile string, duratio
 	// 倉位分析
 	fmt.Println("⭐ 倉位分析")
 	fmt.Println("----------------------------------------")
-	fmt.Printf("總開倉數量:   %d 筆\n", result.TotalOpenedTrades)
-	fmt.Printf("總關倉數量:   %d 筆\n", result.TotalClosedTrades)
-	fmt.Printf("未平倉數量:   %d 筆\n", result.OpenPositionCount)
-	fmt.Printf("未平倉價值:   $%.2f USDT\n", result.OpenPositionValue)
+	fmt.Printf("總開倉數量:     %d 筆\n", result.TotalOpenedTrades)
+	fmt.Printf("總關倉數量:     %d 筆\n", result.TotalClosedTrades)
+	fmt.Printf("未平倉數量:     %d 筆\n", result.OpenPositionCount)
+	fmt.Printf("未平倉價值:     $%.2f USDT\n", result.OpenPositionValue)
+	fmt.Printf("最大持倉價值:   $%.2f USDT ⭐\n", result.MaxOpenPositionValue)
+	fmt.Printf("持倉全滿天數:   %d 天 ⭐\n", result.FullPositionDays)
 	fmt.Println()
 
 	// 交易統計
@@ -131,11 +136,11 @@ func printBacktestResult(result metrics.BacktestResult, dataFile string, duratio
 		result.TotalFeesPaid, result.TotalFeesOpen, result.TotalFeesClose)
 	fmt.Printf("未實現盈虧:   $%.2f USDT", result.UnrealizedPnL)
 	if result.UnrealizedPnL > 0 {
-		fmt.Printf(" 📈 (含預估關倉手續費)\n")
+		fmt.Printf(" 📈 (基於最後K線收盤價，含預估關倉手續費)\n")
 	} else if result.UnrealizedPnL < 0 {
-		fmt.Printf(" 📉 (含預估關倉手續費)\n")
+		fmt.Printf(" 📉 (基於最後K線收盤價，含預估關倉手續費)\n")
 	} else {
-		fmt.Printf(" ➡️ (含預估關倉手續費)\n")
+		fmt.Printf(" ➡️ (基於最後K線收盤價，含預估關倉手續費)\n")
 	}
 	fmt.Printf("淨利潤:       $%.2f USDT", result.NetProfit)
 	if result.NetProfit > 0 {
@@ -359,6 +364,8 @@ func generateReport(
 	report += fmt.Sprintf("- **總關倉數量**: %d 筆\n", result.TotalClosedTrades)
 	report += fmt.Sprintf("- **未平倉數量**: %d 筆\n", result.OpenPositionCount)
 	report += fmt.Sprintf("- **未平倉價值**: $%.2f USDT\n", result.OpenPositionValue)
+	report += fmt.Sprintf("- **最大持倉價值**: $%.2f USDT ⭐\n", result.MaxOpenPositionValue)
+	report += fmt.Sprintf("- **持倉全滿天數**: %d 天 ⭐\n", result.FullPositionDays)
 	report += "\n"
 
 	// 交易統計
@@ -368,12 +375,13 @@ func generateReport(
 		result.TotalFeesPaid, result.TotalFeesOpen, result.TotalFeesClose)
 	report += fmt.Sprintf("- **未實現盈虧**: $%.2f USDT", result.UnrealizedPnL)
 	if result.UnrealizedPnL > 0 {
-		report += " 📈 (含預估關倉手續費)\n"
+		report += " 📈 (基於最後K線收盤價，含預估關倉手續費)\n"
 	} else if result.UnrealizedPnL < 0 {
-		report += " 📉 (含預估關倉手續費)\n"
+		report += " 📉 (基於最後K線收盤價，含預估關倉手續費)\n"
 	} else {
-		report += " ➡️ (含預估關倉手續費)\n"
+		report += " ➡️ (基於最後K線收盤價，含預估關倉手續費)\n"
 	}
+	report += "  > **註**: CSV 中的 UnrealizedPnL 是每次交易時的即時值，報告中的數值是基於回測結束時（最後一根K線）重新計算的結果\n"
 	report += fmt.Sprintf("- **淨利潤**: $%.2f USDT", result.NetProfit)
 	if result.NetProfit > 0 {
 		report += " ✅\n"
@@ -465,62 +473,4 @@ func generateReport(
 	}
 
 	return report
-}
-
-// printTradeLog 打印交易日誌（DEBUG用）
-func printTradeLog(backtestEngine *engine.BacktestEngine) {
-	logs := backtestEngine.GetTradeLog()
-	if len(logs) == 0 {
-		return
-	}
-
-	fmt.Println()
-	fmt.Println("========================================")
-	fmt.Println("📋 交易日誌 (DEBUG)")
-	fmt.Println("========================================")
-	fmt.Printf("總交易日誌數: %d\n", len(logs))
-	fmt.Println()
-
-	// 打印前 10 筆
-	fmt.Println("前 10 筆交易:")
-	fmt.Println("----------------------------------------")
-	printCount := 10
-	if len(logs) < 10 {
-		printCount = len(logs)
-	}
-	for i := 0; i < printCount; i++ {
-		log := logs[i]
-		fmt.Printf("#%d [%s] %s | Price: %.2f | Size: %.2f | Balance: %.2f | PnL: %.2f | %s\n",
-			log.TradeID,
-			log.Time.Format("15:04:05"),
-			log.Action,
-			log.Price,
-			log.PositionSize,
-			log.Balance,
-			log.PnL,
-			log.Reason,
-		)
-	}
-
-	// 打印後 10 筆
-	if len(logs) > 10 {
-		fmt.Println()
-		fmt.Println("後 10 筆交易:")
-		fmt.Println("----------------------------------------")
-		startIdx := len(logs) - 10
-		for i := startIdx; i < len(logs); i++ {
-			log := logs[i]
-			fmt.Printf("#%d [%s] %s | Price: %.2f | Size: %.2f | Balance: %.2f | PnL: %.2f | %s\n",
-				log.TradeID,
-				log.Time.Format("15:04:05"),
-				log.Action,
-				log.Price,
-				log.PositionSize,
-				log.Balance,
-				log.PnL,
-				log.Reason,
-			)
-		}
-	}
-	fmt.Println("========================================")
 }

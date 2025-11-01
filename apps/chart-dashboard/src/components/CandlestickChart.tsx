@@ -36,6 +36,7 @@ interface LegendData {
   avgCost?: number;
   openCount?: number; // ⭐ 開倉數量
   closeCount?: number; // ⭐ 關倉數量
+  openPositions?: number; // ⭐ 當前持倉數量
 }
 
 export function CandlestickChart({
@@ -205,6 +206,24 @@ export function CandlestickChart({
         const openCount = tradesAtThisTime.filter((t) => t.action === 'OPEN').length;
         const closeCount = tradesAtThisTime.filter((t) => t.action === 'CLOSE').length;
 
+        // ⭐ 計算當前持倉量：找出當前時間點或之前最近的交易
+        let openPositions: number | undefined = undefined;
+
+        // 找出當前時間點或之前的所有交易
+        const tradesUpToNow = trades.filter((trade) => {
+          const tradeTimestamp = Math.floor(Date.parse(trade.time + 'Z') / 1000);
+          const tradeCandleTime = Math.floor(tradeTimestamp / 300) * 300;
+          return tradeCandleTime <= currentTimestamp;
+        });
+
+        // 取最後一筆交易的 OpenPositionValue（持倉量）
+        if (tradesUpToNow.length > 0) {
+          const lastTrade = tradesUpToNow[tradesUpToNow.length - 1];
+          if (lastTrade.openPositionValue > 0) {
+            openPositions = lastTrade.openPositionValue;
+          }
+        }
+
         setLegendData({
           time: currentTimeStr,
           open: candleData.open,
@@ -214,6 +233,7 @@ export function CandlestickChart({
           avgCost: costBasisData?.value,
           openCount: openCount > 0 ? openCount : undefined,
           closeCount: closeCount > 0 ? closeCount : undefined,
+          openPositions,
         });
       }
     };
@@ -295,7 +315,7 @@ export function CandlestickChart({
             )}
           </div>
           {/* ⭐ 交易操作統計 */}
-          {(legendData.openCount || legendData.closeCount) && (
+          {(legendData.openCount || legendData.closeCount || legendData.openPositions !== undefined) && (
             <div style={styles.legendRow}>
               {legendData.openCount && (
                 <>
@@ -310,6 +330,14 @@ export function CandlestickChart({
                   <span style={styles.legendLabel}>平倉:</span>
                   <span style={{ ...styles.legendValue, color: '#9C27B0' }}>
                     {legendData.closeCount} 筆
+                  </span>
+                </>
+              )}
+              {legendData.openPositions !== undefined && (
+                <>
+                  <span style={styles.legendLabel}>持倉量:</span>
+                  <span style={{ ...styles.legendValue, color: '#FFD700' }}>
+                    {legendData.openPositions.toFixed(2)}
                   </span>
                 </>
               )}

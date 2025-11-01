@@ -60,6 +60,7 @@ func main() {
 		grid.GridConfig{
 			InstID:             instID,
 			PositionSize:       positionSize, // 固定單次開倉大小為 200 美元
+			FeeRate:            0.0005,       // 0.05% OKX Taker fee
 			TakeProfitRateMin:  cfg.Strategy.Grid.TakeProfitMin,
 			TakeProfitRateMax:  cfg.Strategy.Grid.TakeProfitMax,
 			BreakEvenProfitMin: 0,

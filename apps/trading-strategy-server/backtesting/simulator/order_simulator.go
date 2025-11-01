@@ -25,6 +25,24 @@ type OpenAdvice struct {
 	Reason       string  // 原因
 }
 
+// CloseResult 平倉結果（統一計算所有盈虧指標）⭐
+type CloseResult struct {
+	ClosedPosition ClosedPosition // 已平倉記錄
+
+	// 基於單筆開倉價的盈虧
+	PnL        float64 // 盈虧金額（未扣手續費）
+	PnLPercent float64 // 盈虧百分比
+
+	// 基於平均成本的盈虧（用於交易輪次統計）⭐
+	PnL_Avg        float64 // 基於平均成本的盈虧金額（未扣手續費）
+	PnLPercent_Avg float64 // 基於平均成本的盈虧百分比
+
+	// 手續費和收入
+	CloseFee   float64 // 平倉手續費
+	CloseValue float64 // 平倉時的總價值（本金 + 盈虧）
+	Revenue    float64 // 實際收入（closeValue - closeFee）
+}
+
 // NewOrderSimulator 創建成交模擬器
 func NewOrderSimulator(feeRate, slippage float64) *OrderSimulator {
 	return &OrderSimulator{
@@ -100,63 +118,82 @@ func (s *OrderSimulator) SimulateOpen(
 	return position, actualCost, nil
 }
 
-// SimulateClose 模擬平倉
+// SimulateClose 模擬平倉（統一計算所有盈虧指標）⭐
 //
 // 功能：
-//  1. 計算平倉收入（倉位大小 * 價格變化比例）
-//  2. 計算平倉手續費
-//  3. 計算已實現盈虧（扣除開倉和平倉手續費）
-//  4. 返回已平倉記錄和實際收入
+//  1. 計算關閉的幣數（核心邏輯）
+//  2. 計算基於開倉價的盈虧
+//  3. 計算基於平均成本的盈虧
+//  4. 計算手續費和實際收入
+//  5. 返回完整的 CloseResult
 //
 // 參數：
 //   - position: 持倉記錄
 //   - closePrice: 平倉價格
 //   - closeTime: 平倉時間
+//   - avgCost: 當前平均成本（用於計算 PnL_Avg）
 //
 // 返回：
-//   - ClosedPosition: 已平倉記錄
-//   - float64: 實際收入（倉位大小 + 盈虧 - 手續費）
+//   - CloseResult: 包含所有盈虧指標的完整結果
 //   - error: 錯誤信息
 func (s *OrderSimulator) SimulateClose(
 	position Position,
 	closePrice float64,
 	closeTime time.Time,
-) (ClosedPosition, float64, error) {
+	avgCost float64,
+) (CloseResult, error) {
 	// 1. 驗證輸入
 	if closePrice <= 0 {
-		return ClosedPosition{}, 0, errors.New("close price must be positive")
+		return CloseResult{}, errors.New("close price must be positive")
+	}
+	if avgCost <= 0 {
+		return CloseResult{}, errors.New("avgCost must be positive")
 	}
 
-	// 2. 計算價格變化比例
-	// priceChangeRate = (closePrice - entryPrice) / entryPrice
+	// ⭐ 2. 計算關閉的幣數（核心邏輯 - 必須用 EntryPrice）
+	// 重要：pos.Size 是該筆開倉投入的 USDT 金額
+	// 該筆開倉實際買入的幣數 = Size / EntryPrice
+	closedCoins := position.Size / position.EntryPrice
+
+	// ⭐ 3. 計算基於單筆開倉價的盈虧
 	priceChange := closePrice - position.EntryPrice
-	priceChangeRate := priceChange / position.EntryPrice
+	pnlPercent := (priceChange / position.EntryPrice) * 100 // 百分比
+	pnlAmount := closedCoins * priceChange                  // 金額（未扣手續費）
 
-	// 3. 計算盈虧（未扣除手續費）
-	// profit = positionSize * priceChangeRate
-	profitBeforeFee := position.Size * priceChangeRate
+	// ⭐ 4. 計算基於平均成本的盈虧（使用相同的幣數，但不同的成本基準）
+	priceChange_Avg := closePrice - avgCost
+	pnlPercent_Avg := (priceChange_Avg / avgCost) * 100 // 百分比
+	pnlAmount_Avg := closedCoins * priceChange_Avg      // 金額（未扣手續費）
 
-	// 4. 計算開倉和平倉手續費
-	// 開倉手續費已在開倉時扣除，這裡只計算平倉手續費
-	closeFee := position.Size * s.feeRate
-	openFee := position.Size * s.feeRate // 用於計算總手續費
+	// ⭐ 5. 計算平倉時的實際價值和手續費
+	closeValue := position.Size + pnlAmount        // 平倉時的總價值（本金 + 盈虧）
+	closeFee := closeValue * s.feeRate             // 平倉手續費基於總價值
+	openFee := position.Size * s.feeRate           // 開倉手續費
+	realizedPnL := pnlAmount_Avg - openFee - closeFee // 已實現盈虧（基於平均成本）
 
-	// 5. 計算已實現盈虧（扣除雙邊手續費）
-	realizedPnL := profitBeforeFee - openFee - closeFee
-
-	// 6. 計算實際收入
-	// 實際收入 = 原始倉位大小 + 盈虧 - 平倉手續費
+	// ⭐ 6. 計算實際收入
+	// 實際收入 = 平倉價值 - 平倉手續費
 	// （開倉手續費已在開倉時扣除，這裡只扣平倉手續費）
-	actualRevenue := position.Size + profitBeforeFee - closeFee
+	revenue := closeValue - closeFee
 
 	// 7. 創建已平倉記錄
 	closedPosition := ClosedPosition{
 		Position:     position,
 		ClosePrice:   closePrice,
 		CloseTime:    closeTime,
-		RealizedPnL:  realizedPnL,
+		RealizedPnL:  realizedPnL, // 基於平均成本的盈虧（用於勝率計算）
 		HoldDuration: closeTime.Sub(position.OpenTime),
 	}
 
-	return closedPosition, actualRevenue, nil
+	// ⭐ 8. 返回完整結果
+	return CloseResult{
+		ClosedPosition: closedPosition,
+		PnL:            pnlAmount,
+		PnLPercent:     pnlPercent,
+		PnL_Avg:        pnlAmount_Avg,
+		PnLPercent_Avg: pnlPercent_Avg,
+		CloseFee:       closeFee,
+		CloseValue:     closeValue,
+		Revenue:        revenue,
+	}, nil
 }

@@ -11,12 +11,15 @@ import (
 
 // GridConfig 網格策略配置
 type GridConfig struct {
-	InstID             string  // 交易對
-	PositionSize       float64 // 單次開倉大小（美元）
-	TakeProfitRateMin  float64 // 最小停利比例（例: 0.0015 = 0.15%）
-	TakeProfitRateMax  float64 // 最大停利比例（例: 0.002 = 0.2%）
-	BreakEvenProfitMin float64 // 盈虧平衡最小目標盈利（USDT）
-	BreakEvenProfitMax float64 // 盈虧平衡最大目標盈利（USDT）
+	InstID             string              // 交易對
+	PositionSize       float64             // 單次開倉大小（美元）
+	FeeRate            float64             // 手續費率（例: 0.0005 = 0.05%）
+	TakeProfitRateMin  float64             // 最小停利比例（例: 0.0015 = 0.15%）
+	TakeProfitRateMax  float64             // 最大停利比例（例: 0.002 = 0.2%）
+	BreakEvenProfitMin float64             // 盈虧平衡最小目標盈利（USDT）
+	BreakEvenProfitMax float64             // 盈虧平衡最大目標盈利（USDT）
+	TrendFilterConfig  TrendAnalyzerConfig // 趨勢過濾配置 ⭐
+	EnableTrendFilter  bool                // 是否啟用趨勢過濾 ⭐
 }
 
 // OpenAdvice 開倉建議（領域值對象）
@@ -39,11 +42,14 @@ type OpenAdvice struct {
 type GridAggregate struct {
 	InstID             string
 	PositionSize       float64 // 單次開倉大小（美元）
+	FeeRate            float64 // 手續費率（例: 0.0005 = 0.05%）
 	TakeProfitRateMin  float64 // 最小停利比例（例: 0.0015 = 0.15%）
 	TakeProfitRateMax  float64 // 最大停利比例（例: 0.002 = 0.2%）
 	BreakEvenProfitMin float64 // 盈虧平衡最小目標盈利（USDT）
 	BreakEvenProfitMax float64 // 盈虧平衡最大目標盈利（USDT）
 	Calculator         *GridCalculator
+	TrendAnalyzer      *TrendAnalyzer // 趨勢分析器 ⭐
+	EnableTrendFilter  bool           // 是否啟用趨勢過濾 ⭐
 	// ❌ 移除 lastCandle（改為參數傳入，無狀態設計）
 }
 
@@ -69,11 +75,14 @@ func NewGridAggregate(config GridConfig) (*GridAggregate, error) {
 	return &GridAggregate{
 		InstID:             config.InstID,
 		PositionSize:       config.PositionSize,
+		FeeRate:            config.FeeRate,
 		TakeProfitRateMin:  config.TakeProfitRateMin,
 		TakeProfitRateMax:  config.TakeProfitRateMax,
 		BreakEvenProfitMin: config.BreakEvenProfitMin,
 		BreakEvenProfitMax: config.BreakEvenProfitMax,
 		Calculator:         NewGridCalculator(),
+		TrendAnalyzer:      NewTrendAnalyzer(config.TrendFilterConfig), // ⭐ 初始化趨勢分析器
+		EnableTrendFilter:  config.EnableTrendFilter,                   // ⭐ 是否啟用
 	}, nil
 }
 
@@ -91,18 +100,40 @@ func (g *GridAggregate) GetOpenAdvice(
 	candleHistories []value_objects.Candle,
 	positionSummary value_objects.PositionSummary,
 ) OpenAdvice {
-	// ========== 步驟 1: 檢查盈虧平衡退出 ⭐ ==========
+	// ========== 步驟 1: 趨勢過濾檢查 ⭐ ==========
+	// 如果啟用趨勢過濾，檢查是否允許開倉
+	if g.EnableTrendFilter && len(candleHistories) > 0 {
+		canOpenLong := g.TrendAnalyzer.CanOpenLong(candleHistories)
+		if !canOpenLong {
+			// 趨勢過濾：禁止開多單
+			trendInfo := g.TrendAnalyzer.GetTrendInfo(candleHistories)
+			return OpenAdvice{
+				ShouldOpen: false,
+				Reason: fmt.Sprintf(
+					"trend_filter_blocked: trend=%s, ema_diff=%.2f%%, candle_change=%.2f%%",
+					trendInfo.Status,
+					trendInfo.EMADiffPercent,
+					trendInfo.CandleChange,
+				),
+			}
+		}
+	}
+
+	// ========== 步驟 2: 檢查盈虧平衡退出 ⭐ ==========
 	// 如果有未平倉位，優先檢查是否應該盈虧平衡退出
 	if !positionSummary.IsEmpty() {
-		feeRate := 0.0005 // OKX Taker 手續費率
-
 		// 判斷是否應該盈虧平衡退出
 		shouldExit, expectedProfit := positionSummary.ShouldBreakEven(
 			currentPrice.Value(),
-			feeRate,
+			g.FeeRate,
 			g.BreakEvenProfitMin,
 			g.BreakEvenProfitMax,
 		)
+
+		// shouldExit, expectedProfit := positionSummary.ShouldBreakEven2(
+		// 	g.BreakEvenProfitMin,
+		// 	g.BreakEvenProfitMax,
+		// )
 
 		if shouldExit {
 			// 應該盈虧平衡退出 - 不開新倉
@@ -118,7 +149,7 @@ func (g *GridAggregate) GetOpenAdvice(
 		}
 	}
 
-	// ========== 步驟 2: 正常開倉邏輯 ⭐ ==========
+	// ========== 步驟 3: 正常開倉邏輯 ⭐ ==========
 	// ✅ 使用 decimal 进行精确计算
 	currentPriceDecimal := decimal.NewFromFloat(currentPrice.Value())
 
@@ -166,7 +197,24 @@ func (g *GridAggregate) GetState() map[string]any {
 		"takeProfitRateMax":  g.TakeProfitRateMax,
 		"breakEvenProfitMin": g.BreakEvenProfitMin,
 		"breakEvenProfitMax": g.BreakEvenProfitMax,
+		"enableTrendFilter":  g.EnableTrendFilter, // ⭐ 新增
 	}
+}
+
+// GetTrendInfo 獲取當前趨勢信息（用於日誌調試）⭐
+// 參數：
+//   - candleHistories: K線歷史數據
+//
+// 返回：
+//   - TrendInfo: 趨勢詳細信息
+func (g *GridAggregate) GetTrendInfo(candleHistories []value_objects.Candle) TrendInfo {
+	if !g.EnableTrendFilter {
+		return TrendInfo{
+			Status: "trend_filter_disabled",
+		}
+	}
+
+	return g.TrendAnalyzer.GetTrendInfo(candleHistories)
 }
 
 // GetName 獲取策略名稱

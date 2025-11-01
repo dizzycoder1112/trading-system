@@ -8,35 +8,37 @@ import (
 
 // BacktestResult 回测结果
 type BacktestResult struct {
-	InitialBalance      float64       // 初始资金
-	FinalBalance        float64       // 最终资金（可用余额）
-	TotalEquity         float64       // 总权益（余额 + 未平仓价值 + 浮盈亏）⭐
+	InitialBalance float64 // 初始资金
+	FinalBalance   float64 // 最终资金（可用余额）
+	TotalEquity    float64 // 总权益（余额 + 未平仓价值 + 浮盈亏）⭐
 
 	// 倉位分析
-	TotalOpenedTrades   int           // 總開倉數量 ⭐ 新增
-	TotalClosedTrades   int           // 總關倉數量 ⭐ 新增
-	OpenPositionCount   int           // 未平仓数量
-	OpenPositionValue   float64       // 未平仓总价值
+	TotalOpenedTrades    int     // 總開倉數量 ⭐ 新增
+	TotalClosedTrades    int     // 總關倉數量 ⭐ 新增
+	OpenPositionCount    int     // 未平仓数量
+	OpenPositionValue    float64 // 未平仓总价值
+	MaxOpenPositionValue float64 // 最大持倉價值（USDT）⭐ 新增
+	FullPositionDays     int     // 持倉全滿的天數 ⭐ 新增
 
 	// 交易統計
-	TotalProfitGross    float64       // 總利潤（未扣手續費的價差盈利）⭐ 新增
-	TotalFeesOpen       float64       // 開倉總手續費 ⭐ 新增
-	TotalFeesClose      float64       // 關倉總手續費 ⭐ 新增
-	TotalFeesPaid       float64       // 總手續費（開倉 + 關倉）
-	UnrealizedPnL       float64       // 未實現盈虧（含預估關倉手續費）⭐
-	NetProfit           float64       // 淨利潤 = 總利潤 + 未實現盈虧 - 總手續費 ⭐
-	TotalReturn         float64       // 總收益率 (%)
-	ProfitFactor        float64       // 盈虧比（含未實現盈虧）⭐
-	WinRate             float64       // 勝率 (%)
-	AvgHoldDuration     time.Duration // 平均持倉時長
-	MaxDrawdown         float64       // 最大回撤 (%)
+	TotalProfitGross float64       // 總利潤（未扣手續費的價差盈利）⭐ 新增
+	TotalFeesOpen    float64       // 開倉總手續費 ⭐ 新增
+	TotalFeesClose   float64       // 關倉總手續費 ⭐ 新增
+	TotalFeesPaid    float64       // 總手續費（開倉 + 關倉）
+	UnrealizedPnL    float64       // 未實現盈虧（含預估關倉手續費）⭐
+	NetProfit        float64       // 淨利潤 = 總利潤 + 未實現盈虧 - 總手續費 ⭐
+	TotalReturn      float64       // 總收益率 (%)
+	ProfitFactor     float64       // 盈虧比（含未實現盈虧）⭐
+	WinRate          float64       // 勝率 (%)
+	AvgHoldDuration  time.Duration // 平均持倉時長
+	MaxDrawdown      float64       // 最大回撤 (%)
 
 	// 詳細統計（保留用於其他分析）
-	TotalTrades         int           // 總交易次數（已平倉）
-	WinningTrades       int           // 盈利交易次數
-	LosingTrades        int           // 虧損交易次數
-	TotalProfit         float64       // 總盈利金額（已實現，已扣費）
-	TotalLoss           float64       // 總虧損金額（已實現，已扣費）
+	TotalTrades   int     // 總交易次數（已平倉）
+	WinningTrades int     // 盈利交易次數
+	LosingTrades  int     // 虧損交易次數
+	TotalProfit   float64 // 總盈利金額（已實現，已扣費）
+	TotalLoss     float64 // 總虧損金額（已實現，已扣費）
 }
 
 // BalanceSnapshot 资金快照（用于计算最大回撤）
@@ -104,8 +106,15 @@ func (mc *MetricsCalculator) Calculate(
 	// 2. 計算總手續費
 	totalFeesPaid := totalFeesOpen + totalFeesClose
 
-	// 3. 計算淨利潤 ⭐ 新定義
-	// NetProfit = TotalProfitGross + UnrealizedPnL - TotalFees
+	// 3. 計算淨利潤 ⭐ 正確公式
+	// NetProfit = TotalProfitGross + UnrealizedPnL - TotalFeesPaid
+	//
+	// 說明：
+	// - totalProfitGross: 已平倉的毛利潤（未扣任何費用）
+	// - unrealizedPnL: 未平倉的盈虧（已扣預估平倉費，但未扣開倉費）
+	// - totalFeesPaid: 所有已支付費用（已平倉開倉費 + 已平倉平倉費 + 未平倉開倉費）
+	//
+	// 注意：unrealizedPnL 內部已扣除未平倉的預估平倉費，所以這裡不需要重複扣
 	netProfit := totalProfitGross + unrealizedPnL - totalFeesPaid
 
 	// 4. 计算总权益（可用余额 + 未平仓价值 + 未实现盈亏）
@@ -124,8 +133,8 @@ func (mc *MetricsCalculator) Calculate(
 	// 7. 计算胜率、盈亏比（含未實現盈虧）⭐
 	winningTrades := 0
 	losingTrades := 0
-	totalProfitRealized := 0.0  // 已實現盈利（已扣費）
-	totalLossRealized := 0.0    // 已實現虧損（已扣費）
+	totalProfitRealized := 0.0 // 已實現盈利（已扣費）
+	totalLossRealized := 0.0   // 已實現虧損（已扣費）
 
 	for _, closed := range closedPositions {
 		if closed.RealizedPnL > 0 {
@@ -165,35 +174,35 @@ func (mc *MetricsCalculator) Calculate(
 	avgHoldDuration := positionTracker.GetAverageHoldDuration()
 
 	return BacktestResult{
-		InitialBalance:      mc.initialBalance,
-		FinalBalance:        finalBalance,
-		TotalEquity:         totalEquity,
+		InitialBalance: mc.initialBalance,
+		FinalBalance:   finalBalance,
+		TotalEquity:    totalEquity,
 
 		// 倉位分析
-		TotalOpenedTrades:   totalOpenedTrades,
-		TotalClosedTrades:   totalTrades,
-		OpenPositionCount:   openPositionCount,
-		OpenPositionValue:   openPositionValue,
+		TotalOpenedTrades: totalOpenedTrades,
+		TotalClosedTrades: totalTrades,
+		OpenPositionCount: openPositionCount,
+		OpenPositionValue: openPositionValue,
 
 		// 交易統計
-		TotalProfitGross:    totalProfitGross,
-		TotalFeesOpen:       totalFeesOpen,
-		TotalFeesClose:      totalFeesClose,
-		TotalFeesPaid:       totalFeesPaid,
-		UnrealizedPnL:       unrealizedPnL,
-		NetProfit:           netProfit,
-		TotalReturn:         totalReturn,
-		ProfitFactor:        profitFactor,
-		WinRate:             winRate,
-		AvgHoldDuration:     avgHoldDuration,
-		MaxDrawdown:         maxDrawdown,
+		TotalProfitGross: totalProfitGross,
+		TotalFeesOpen:    totalFeesOpen,
+		TotalFeesClose:   totalFeesClose,
+		TotalFeesPaid:    totalFeesPaid,
+		UnrealizedPnL:    unrealizedPnL,
+		NetProfit:        netProfit,
+		TotalReturn:      totalReturn,
+		ProfitFactor:     profitFactor,
+		WinRate:          winRate,
+		AvgHoldDuration:  avgHoldDuration,
+		MaxDrawdown:      maxDrawdown,
 
 		// 詳細統計
-		TotalTrades:         totalTrades,
-		WinningTrades:       winningTrades,
-		LosingTrades:        losingTrades,
-		TotalProfit:         totalProfitRealized,
-		TotalLoss:           totalLossRealized,
+		TotalTrades:   totalTrades,
+		WinningTrades: winningTrades,
+		LosingTrades:  losingTrades,
+		TotalProfit:   totalProfitRealized,
+		TotalLoss:     totalLossRealized,
 	}
 }
 

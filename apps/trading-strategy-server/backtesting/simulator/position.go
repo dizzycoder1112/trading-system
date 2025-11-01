@@ -28,6 +28,8 @@ type PositionTracker struct {
 	openPositions   []Position       // 未平倉持倉
 	closedPositions []ClosedPosition // 已平倉記錄
 	nextID          int              // 用於生成持倉ID
+	avgCost         float64          // ⭐ 累進的平均成本
+	totalCoins      float64          // ⭐ 總持倉幣數
 }
 
 // NewPositionTracker 創建倉位追蹤器
@@ -36,16 +38,34 @@ func NewPositionTracker() *PositionTracker {
 		openPositions:   make([]Position, 0),
 		closedPositions: make([]ClosedPosition, 0),
 		nextID:          1,
+		avgCost:         0,
+		totalCoins:      0,
 	}
 }
 
-// AddPosition 添加新持倉
+// AddPosition 添加新持倉（使用累進式計算平均成本）⭐
 func (pt *PositionTracker) AddPosition(
 	entryPrice float64,
 	size float64,
 	openTime time.Time,
 	targetClosePrice float64,
 ) Position {
+	// ⭐ 計算新買入的幣數
+	newCoins := size / entryPrice
+
+	// ⭐ 累進公式更新平均成本
+	// 新平均成本 = (原平均成本 × 原幣數 + 新價格 × 新幣數) / (原幣數 + 新幣數)
+	if pt.totalCoins > 0 {
+		pt.avgCost = (pt.avgCost*pt.totalCoins + entryPrice*newCoins) / (pt.totalCoins + newCoins)
+	} else {
+		// 第一次開倉，平均成本就是開倉價
+		pt.avgCost = entryPrice
+	}
+
+	// ⭐ 更新總幣數
+	pt.totalCoins += newCoins
+
+	// 創建持倉記錄
 	position := Position{
 		ID:               fmt.Sprintf("pos_%d", pt.nextID),
 		EntryPrice:       entryPrice,
@@ -60,7 +80,7 @@ func (pt *PositionTracker) AddPosition(
 	return position
 }
 
-// ClosePosition 平倉
+// ClosePosition 平倉（關倉只減少幣數，不改變平均成本）⭐
 func (pt *PositionTracker) ClosePosition(
 	positionID string,
 	closePrice float64,
@@ -81,6 +101,22 @@ func (pt *PositionTracker) ClosePosition(
 
 	if foundIndex == -1 {
 		return fmt.Errorf("position not found: %s", positionID)
+	}
+
+	// ⭐ 計算減少的幣數（用該倉位的開倉價計算）
+	// 重要：必須用 EntryPrice 而不是 avgCost，因為：
+	// - position.Size 是該筆開倉投入的 USDT 金額
+	// - 該筆開倉實際買入的幣數 = Size / EntryPrice
+	// - 平倉時應該平掉實際買入的幣數，而不是用平均成本計算的幣數
+	closedCoins := position.Size / position.EntryPrice
+
+	// ⭐ 只減少總幣數，平均成本不變
+	pt.totalCoins -= closedCoins
+
+	// ⭐ 如果所有倉位都關閉了，重置平均成本
+	if pt.totalCoins <= 0.00001 { // 使用小值避免浮點誤差
+		pt.avgCost = 0
+		pt.totalCoins = 0
 	}
 
 	// 從開倉列表中移除
@@ -138,27 +174,18 @@ func (pt *PositionTracker) GetOpenPositionCount() int {
 	return len(pt.openPositions)
 }
 
-// CalculateAverageCost 計算平均成本
+// CalculateAverageCost 計算平均成本（直接返回累進計算的結果）⭐
 func (pt *PositionTracker) CalculateAverageCost() float64 {
-	if len(pt.openPositions) == 0 {
-		return 0
-	}
-
-	totalCost := 0.0        // 總花費（USDT）
-	totalCoinAmount := 0.0  // 總持倉量（幣數）
-
-	for _, pos := range pt.openPositions {
-		// pos.Size 是 USDT 金額，需要除以 EntryPrice 得到幣的數量
-		coinAmount := pos.Size / pos.EntryPrice
-		totalCoinAmount += coinAmount
-		totalCost += pos.Size
-	}
-
-	// 平均成本 = 總花費 / 總持倉量（幣數）
-	return totalCost / totalCoinAmount
+	return pt.avgCost
 }
 
-// CalculateUnrealizedPnL 計算未實現盈虧
+// CalculateUnrealizedPnL 計算未實現盈虧（含預估平倉手續費）
+//
+// 重要：開倉手續費已經在開倉時從餘額中扣除，不應該在這裡再扣一次！
+// UnrealizedPnL 只應該包含：
+//   1. 價格變化帶來的浮動盈虧
+//   2. 預估的平倉手續費（因為還沒平倉）
+//
 // currentPrice: 當前市場價格
 // feeRate: 手續費率（用於估算平倉成本）
 func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate float64) float64 {
@@ -169,13 +196,19 @@ func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate 
 	totalPnL := 0.0
 
 	for _, pos := range pt.openPositions {
-		// 計算價格變化
-		priceChange := currentPrice - pos.EntryPrice
+		// ⭐ 1. 計算關閉的幣數（和 OrderSimulator 使用相同邏輯）
+		closedCoins := pos.Size / pos.EntryPrice
 
-		// 計算盈虧（扣除開倉和平倉手續費）
-		profitBeforeFee := (priceChange / pos.EntryPrice) * pos.Size
-		fee := pos.Size * feeRate * 2 // 開倉 + 平倉
-		pnl := profitBeforeFee - fee
+		// ⭐ 2. 計算價格變化和盈虧（基於幣數）
+		priceChange := currentPrice - pos.EntryPrice
+		profitBeforeFee := closedCoins * priceChange
+
+		// ⭐ 3. 計算平倉手續費（只計算平倉費，開倉費已經在開倉時扣過了）
+		closeValue := pos.Size + profitBeforeFee // 平倉時的總價值
+		closeFee := closeValue * feeRate         // 平倉手續費基於平倉價值
+
+		// ⭐ 4. 未實現盈虧 = 浮動盈虧 - 預估平倉費（不包含開倉費）
+		pnl := profitBeforeFee - closeFee
 
 		totalPnL += pnl
 	}

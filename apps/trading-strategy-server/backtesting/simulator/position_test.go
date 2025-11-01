@@ -72,11 +72,14 @@ func TestPositionTracker_CalculateUnrealizedPnL(t *testing.T) {
 	unrealizedPnL := tracker.CalculateUnrealizedPnL(currentPrice, feeRate)
 
 	// 預期：
+	// 幣數: 200 / 2500 = 0.08 BTC
 	// 價格變化: 2510 - 2500 = 10
-	// 收益: (10 / 2500) * 200 = 0.8 USDT
-	// 手續費: 200 * 0.0005 * 2 = 0.20 USDT
-	// 淨盈虧: 0.8 - 0.20 = 0.60 USDT
-	expected := 0.60
+	// 浮動盈虧: 0.08 * 10 = 0.8 USDT
+	// 平倉價值: 200 + 0.8 = 200.8 USDT
+	// 平倉手續費: 200.8 * 0.0005 = 0.1004 USDT ⭐ 只計算平倉費
+	// 未實現盈虧: 0.8 - 0.1004 = 0.6996 ≈ 0.70 USDT
+	// 註：開倉手續費已經在開倉時從餘額中扣除，不應該在這裡再扣 ⭐
+	expected := 0.70
 
 	// 允許浮點誤差
 	if diff := unrealizedPnL - expected; diff > 0.01 || diff < -0.01 {

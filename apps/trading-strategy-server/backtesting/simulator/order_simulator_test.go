@@ -116,17 +116,18 @@ func TestOrderSimulator_SimulateClose_Profit(t *testing.T) {
 	// 模擬平倉（盈利）
 	closePrice := 2503.75 // 平倉價格高於開倉價格
 	closeTime := openTime.Add(5 * time.Minute)
+	avgCost := position.EntryPrice // 單倉位，平均成本等於開倉價
 
-	closedPosition, actualRevenue, err := simulator.SimulateClose(position, closePrice, closeTime)
+	closeResult, err := simulator.SimulateClose(position, closePrice, closeTime, avgCost)
 
 	// 驗證無錯誤
 	assert.NoError(t, err)
 
 	// 驗證已平倉記錄
-	assert.Equal(t, position.ID, closedPosition.ID)
-	assert.Equal(t, closePrice, closedPosition.ClosePrice)
-	assert.Equal(t, closeTime, closedPosition.CloseTime)
-	assert.Equal(t, 5*time.Minute, closedPosition.HoldDuration)
+	assert.Equal(t, position.ID, closeResult.ClosedPosition.ID)
+	assert.Equal(t, closePrice, closeResult.ClosedPosition.ClosePrice)
+	assert.Equal(t, closeTime, closeResult.ClosedPosition.CloseTime)
+	assert.Equal(t, 5*time.Minute, closeResult.ClosedPosition.HoldDuration)
 
 	// 驗證盈虧計算
 	// 價格變化比例 = (2503.75 - 2500) / 2500 = 0.0015 (0.15%)
@@ -135,18 +136,18 @@ func TestOrderSimulator_SimulateClose_Profit(t *testing.T) {
 	// 平倉手續費 = 200 * 0.0006 = 0.12
 	// 已實現盈虧 = 0.3 - 0.12 - 0.12 = 0.06
 	// 實際輸出可能因浮點數精度略有差異，使用容差驗證
-	assert.InDelta(t, 0.06, closedPosition.RealizedPnL, 0.05)
+	assert.InDelta(t, 0.06, closeResult.ClosedPosition.RealizedPnL, 0.05)
 
 	// 驗證實際收入
 	// 實際收入 = 200 + 0.3 - 0.12 = 200.18
-	assert.InDelta(t, 200.18, actualRevenue, 0.05)
+	assert.InDelta(t, 200.18, closeResult.Revenue, 0.05)
 
 	t.Logf("✅ Close position with profit")
 	t.Logf("   Entry: %.2f → Close: %.2f", position.EntryPrice, closePrice)
 	t.Logf("   Price Change: %.2f%%", ((closePrice-position.EntryPrice)/position.EntryPrice)*100)
-	t.Logf("   Realized PnL: %.2f USDT", closedPosition.RealizedPnL)
-	t.Logf("   Actual Revenue: %.2f USDT", actualRevenue)
-	t.Logf("   Hold Duration: %v", closedPosition.HoldDuration)
+	t.Logf("   Realized PnL: %.2f USDT", closeResult.ClosedPosition.RealizedPnL)
+	t.Logf("   Actual Revenue: %.2f USDT", closeResult.Revenue)
+	t.Logf("   Hold Duration: %v", closeResult.ClosedPosition.HoldDuration)
 }
 
 // TestOrderSimulator_SimulateClose_Loss 測試虧損平倉
@@ -166,8 +167,9 @@ func TestOrderSimulator_SimulateClose_Loss(t *testing.T) {
 	// 模擬平倉（虧損）
 	closePrice := 2490.0 // 平倉價格低於開倉價格
 	closeTime := openTime.Add(10 * time.Minute)
+	avgCost := position.EntryPrice // 單倉位，平均成本等於開倉價
 
-	closedPosition, actualRevenue, err := simulator.SimulateClose(position, closePrice, closeTime)
+	closeResult, err := simulator.SimulateClose(position, closePrice, closeTime, avgCost)
 
 	// 驗證無錯誤
 	assert.NoError(t, err)
@@ -179,16 +181,16 @@ func TestOrderSimulator_SimulateClose_Loss(t *testing.T) {
 	// 平倉手續費 = 200 * 0.0006 = 0.12
 	// 已實現盈虧 = -0.8 - 0.12 - 0.12 = -1.04
 	// 實際輸出可能因浮點數精度略有差異，使用容差驗證
-	assert.InDelta(t, -1.04, closedPosition.RealizedPnL, 0.05)
+	assert.InDelta(t, -1.04, closeResult.ClosedPosition.RealizedPnL, 0.05)
 
 	// 驗證虧損
-	assert.True(t, closedPosition.RealizedPnL < 0)
+	assert.True(t, closeResult.ClosedPosition.RealizedPnL < 0)
 
 	t.Logf("✅ Close position with loss")
 	t.Logf("   Entry: %.2f → Close: %.2f", position.EntryPrice, closePrice)
 	t.Logf("   Price Change: %.2f%%", ((closePrice-position.EntryPrice)/position.EntryPrice)*100)
-	t.Logf("   Realized PnL: %.2f USDT", closedPosition.RealizedPnL)
-	t.Logf("   Actual Revenue: %.2f USDT", actualRevenue)
+	t.Logf("   Realized PnL: %.2f USDT", closeResult.ClosedPosition.RealizedPnL)
+	t.Logf("   Actual Revenue: %.2f USDT", closeResult.Revenue)
 }
 
 // TestOrderSimulator_SimulateClose_BreakEven 測試打平平倉
@@ -210,19 +212,20 @@ func TestOrderSimulator_SimulateClose_BreakEven(t *testing.T) {
 	// 打平價格 = 2500 * (1 + 0.0012) = 2503
 	breakEvenPrice := 2503.0
 	closeTime := openTime.Add(3 * time.Minute)
+	avgCost := position.EntryPrice // 單倉位，平均成本等於開倉價
 
-	closedPosition, actualRevenue, err := simulator.SimulateClose(position, breakEvenPrice, closeTime)
+	closeResult, err := simulator.SimulateClose(position, breakEvenPrice, closeTime, avgCost)
 
 	// 驗證無錯誤
 	assert.NoError(t, err)
 
 	// 驗證打平（盈虧接近 0）
-	assert.InDelta(t, 0.0, closedPosition.RealizedPnL, 0.05)
+	assert.InDelta(t, 0.0, closeResult.ClosedPosition.RealizedPnL, 0.05)
 
 	t.Logf("✅ Close position at break-even")
 	t.Logf("   Entry: %.2f → Close: %.2f", position.EntryPrice, breakEvenPrice)
-	t.Logf("   Realized PnL: %.2f USDT (≈ 0)", closedPosition.RealizedPnL)
-	t.Logf("   Actual Revenue: %.2f USDT", actualRevenue)
+	t.Logf("   Realized PnL: %.2f USDT (≈ 0)", closeResult.ClosedPosition.RealizedPnL)
+	t.Logf("   Actual Revenue: %.2f USDT", closeResult.Revenue)
 }
 
 // TestOrderSimulator_SimulateClose_InvalidPrice 測試無效平倉價格
@@ -237,7 +240,7 @@ func TestOrderSimulator_SimulateClose_InvalidPrice(t *testing.T) {
 	}
 
 	// 無效平倉價格（<= 0）
-	_, _, err := simulator.SimulateClose(position, 0, time.Now())
+	_, err := simulator.SimulateClose(position, 0, time.Now(), 2500.0)
 
 	// 驗證錯誤
 	assert.Error(t, err)
@@ -275,18 +278,19 @@ func TestOrderSimulator_CompleteTradeFlow(t *testing.T) {
 	// 3. 平倉
 	closePrice := 2503.75
 	closeTime := openTime.Add(10 * time.Minute)
+	avgCost := position.EntryPrice // 單倉位，平均成本等於開倉價
 
-	closedPosition, revenue, err := simulator.SimulateClose(position, closePrice, closeTime)
+	closeResult, err := simulator.SimulateClose(position, closePrice, closeTime, avgCost)
 	assert.NoError(t, err)
 
 	// 增加平倉收入
-	balance += revenue
-	t.Logf("After Close: %.2f USDT (revenue: %.2f)", balance, revenue)
+	balance += closeResult.Revenue
+	t.Logf("After Close: %.2f USDT (revenue: %.2f)", balance, closeResult.Revenue)
 
 	// 4. 驗證最終餘額
 	// 最終餘額 = 10000 - openCost + revenue
 	// 理論盈虧 = 0.06（如前面計算）
-	expectedFinalBalance := 10000.0 + closedPosition.RealizedPnL
+	expectedFinalBalance := 10000.0 + closeResult.ClosedPosition.RealizedPnL
 	assert.InDelta(t, expectedFinalBalance, balance, 0.01)
 
 	t.Logf("✅ Complete trade flow")
