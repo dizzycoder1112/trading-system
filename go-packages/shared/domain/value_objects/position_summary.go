@@ -104,59 +104,6 @@ func (ps PositionSummary) CalculateBreakEvenPrice(feeRate float64) float64 {
 // 返回：
 //   - shouldExit: 是否應該退出
 //   - expectedProfit: 預期盈利（USDT）
-func (ps PositionSummary) ShouldBreakEven(
-	currentPrice float64,
-	feeRate float64,
-	targetProfitMin float64,
-	targetProfitMax float64,
-) (shouldExit bool, expectedProfit float64) {
-	if ps.Count == 0 {
-		return false, 0
-	}
-
-	// ⭐ 新增：如果本輪還沒有任何關倉，不觸發打平機制
-	if ps.CurrentRoundClosedValue == 0 {
-		return false, 0
-	}
-
-	// ⭐ 新增：如果當前輪次已實現盈虧不為負值，不觸發打平機制（打平是防守機制，只在虧損時觸發）
-	if ps.CurrentRoundRealizedPnL >= 0 {
-		return false, 0
-	}
-
-	// ========== 計算未實現盈虧 ==========
-	priceChange := currentPrice - ps.AvgPrice
-	unrealizedPnL := ps.TotalSize * (priceChange / ps.AvgPrice)
-
-	// ========== 計算預期平倉手續費 ==========
-	closeValue := ps.TotalSize + unrealizedPnL
-	closeFee := closeValue * feeRate
-
-	// ========== 計算預期淨利潤 ⭐ 包含當前輪次已實現盈虧 ==========
-	//
-	// 正確公式：
-	// expectedProfit = CurrentRoundRealizedPnL + (unrealizedPnL - closeFee)
-	//
-	// 說明：
-	// - CurrentRoundRealizedPnL：本輪已平倉的淨盈虧（已扣除開倉費和平倉費）
-	// - unrealizedPnL：未平倉的浮動盈虧（未扣任何費用）
-	// - closeFee：預估平倉手續費
-	// - 未平倉的開倉費：已在開倉時從餘額扣除，不需要在這裡再扣
-	//
-	// ❌ 錯誤：不應該扣 ps.FeesPaid，因為：
-	//   1. CurrentRoundRealizedPnL 已經包含了已平倉的所有費用
-	//   2. 未平倉的開倉費已從餘額扣除，會在實際平倉時自然體現
-	//   3. 重複扣除會導致 expectedProfit 永遠為負，打平機制永不觸發
-	expectedProfit = ps.CurrentRoundRealizedPnL + unrealizedPnL - closeFee
-
-	// 判斷是否應該觸發打平機制
-	// 條件：expectedProfit >= targetProfitMin（例如 >= 0）
-	if expectedProfit > targetProfitMin {
-		return true, expectedProfit
-	}
-
-	return false, expectedProfit
-}
 
 // ShouldBreakEven2 判斷是否應該盈虧平衡退出（使用外部計算的 unrealizedPnL）⭐
 //
@@ -175,7 +122,7 @@ func (ps PositionSummary) ShouldBreakEven(
 // 返回：
 //   - shouldExit: 是否應該退出
 //   - expectedProfit: 預期盈利（USDT）
-func (ps PositionSummary) ShouldBreakEven2(
+func (ps PositionSummary) ShouldBreakEven(
 	targetProfitMin float64,
 	targetProfitMax float64,
 ) (shouldExit bool, expectedProfit float64) {

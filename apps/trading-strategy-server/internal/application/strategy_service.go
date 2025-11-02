@@ -95,7 +95,8 @@ func (s *StrategyService) GetOpenAdvice(
 	emptyPositionSummary := value_objects.NewPositionSummary(0, 0, 0, 0, 0, 0, 0) // ⭐ 包含 currentRoundRealizedPnL 和 currentRoundClosedValue
 
 	// 4. 調用領域邏輯獲取建議 ⭐ 傳入倉位摘要
-	advice := s.grid.GetOpenAdvice(currentPrice, lastCandle, candlehistories, emptyPositionSummary)
+	// 注意：實盤中使用 lastCandle 作為 currentCandle（因為當前K線還未結束）
+	advice := s.grid.GetOpenAdvice(currentPrice, lastCandle, candlehistories[0], candlehistories, emptyPositionSummary)
 
 	// 4. 記錄日誌
 	// if advice.ShouldOpen {

@@ -14,16 +14,21 @@ import (
 func main() {
 	// 解析命令行參數
 	dataFile := flag.String("data", "", "歷史數據文件路徑 (必填)")
-	initialBalance := flag.Float64("initial-balance", 30000.0, "初始資金 (USDT)")
+	initialBalance := flag.Float64("initial-balance", 10000.0, "初始資金 (USDT)")
 	feeRate := flag.Float64("fee-rate", 0.0005, "手續費率 (默認: 0.0005 = 0.05%)")
 	positionSize := flag.Float64("position-size", 100.0, "單次開倉大小 (USDT)")
 	slippage := flag.Float64("slippage", 0.0, "滑點 (默認: 0)")
 	instID := flag.String("inst-id", "ETH-USDT-SWAP", "交易對")
 	takeProfitMin := flag.Float64("take-profit-min", 0.0015, "最小止盈百分比 (默認: 0.0015 = 0.15%)")
 	takeProfitMax := flag.Float64("take-profit-max", 0.01, "最大止盈百分比 (默認: 0.0020 = 0.20%)")
-	breakEvenProfitMin := flag.Float64("break-even-profit-min", 0.0, "打平最小目標盈利 (USDT, 默認: 0)")
+	breakEvenProfitMin := flag.Float64("break-even-profit-min", -0.1, "打平最小目標盈利 (USDT, 默認: 0)")
 	breakEvenProfitMax := flag.Float64("break-even-profit-max", 20.0, "打平最大目標盈利 (USDT, 默認: 20)")
-	enableTrendFilter := flag.Bool("enable-trend-filter", false, "是否啟用趨勢過濾 (默認: true) ⭐")
+	enableTrendFilter := flag.Bool("enable-trend-filter", false, "是否啟用趨勢過濾 (默認: false) ⭐")
+	enableRedCandleFilter := flag.Bool("enable-red-candle-filter", true, "是否啟用紅K過濾（虧損時只在紅K開倉，默認: true）⭐")
+	// 自動注資參數 ⭐
+	enableAutoFunding := flag.Bool("enable-auto-funding", true, "是否啟用自動注資 (默認: false)")
+	autoFundingAmount := flag.Float64("auto-funding-amount", 5000.0, "自動注資金額 (USDT, 默認: 5000)")
+	autoFundingIdle := flag.Int("auto-funding-idle", 12, "觸發注資的閒置K線數 (默認: 288 根，約1天)")
 
 	flag.Parse()
 
@@ -58,21 +63,33 @@ func main() {
 	fmt.Printf("止盈範圍: %.2f%% ~ %.2f%%\n", *takeProfitMin*100, *takeProfitMax*100)
 	fmt.Printf("打平目標: $%.2f ~ $%.2f USDT\n", *breakEvenProfitMin, *breakEvenProfitMax)
 	fmt.Printf("趨勢過濾: %v ⭐\n", *enableTrendFilter)
+	fmt.Printf("紅K過濾: %v ⭐ (虧損時只在紅K開倉)\n", *enableRedCandleFilter)
+	fmt.Printf("自動注資: %v", *enableAutoFunding)
+	if *enableAutoFunding {
+		fmt.Printf(" ⭐ (金額: $%.2f, 閒置閾值: %d 根K線)\n", *autoFundingAmount, *autoFundingIdle)
+	} else {
+		fmt.Println()
+	}
 	fmt.Println("========================================")
 	fmt.Println()
 
 	// 創建回測引擎配置
 	config := engine.BacktestConfig{
-		InitialBalance:     *initialBalance,
-		FeeRate:            *feeRate,
-		Slippage:           *slippage,
-		InstID:             *instID,
-		TakeProfitMin:      *takeProfitMin,
-		TakeProfitMax:      *takeProfitMax,
-		PositionSize:       *positionSize,
-		BreakEvenProfitMin: *breakEvenProfitMin,
-		BreakEvenProfitMax: *breakEvenProfitMax,
-		EnableTrendFilter:  *enableTrendFilter, // ⭐ 趨勢過濾
+		InitialBalance:        *initialBalance,
+		FeeRate:               *feeRate,
+		Slippage:              *slippage,
+		InstID:                *instID,
+		TakeProfitMin:         *takeProfitMin,
+		TakeProfitMax:         *takeProfitMax,
+		PositionSize:          *positionSize,
+		BreakEvenProfitMin:    *breakEvenProfitMin,
+		BreakEvenProfitMax:    *breakEvenProfitMax,
+		EnableTrendFilter:     *enableTrendFilter,     // ⭐ 趨勢過濾
+		EnableRedCandleFilter: *enableRedCandleFilter, // ⭐ 紅K過濾
+		// 自動注資配置 ⭐
+		EnableAutoFunding: *enableAutoFunding, // 是否啟用自動注資
+		AutoFundingAmount: *autoFundingAmount, // 注資金額
+		AutoFundingIdle:   *autoFundingIdle,   // 閒置閾值
 	}
 
 	// 創建回測引擎
@@ -313,7 +330,7 @@ func exportResults(
 	}
 
 	// 2. 生成報告內容
-	reportContent := generateReport(result, dataFile, positionSize, duration, config)
+	reportContent := generateReport(backtestEngine, result, dataFile, positionSize, duration, config)
 
 	// 3. 導出報告文件 (Markdown)
 	reportPath := filepath.Join(fullPath, "report.md")
@@ -328,6 +345,7 @@ func exportResults(
 
 // generateReport 生成 Markdown 格式的回測報告
 func generateReport(
+	backtestEngine *engine.BacktestEngine,
 	result metrics.BacktestResult,
 	dataFile string,
 	positionSize float64,
@@ -470,6 +488,20 @@ func generateReport(
 	}
 	if score >= 8 {
 		report += "- 策略表現優秀，建議進行實盤小額測試！\n"
+	}
+
+	// ⭐ 添加打平輪次報告（如果有）
+	breakEvenReport := backtestEngine.GenerateBreakEvenReportMarkdown()
+	if breakEvenReport != "" {
+		report += "\n---\n\n"
+		report += breakEvenReport
+	}
+
+	// ⭐ 添加自動注資報告（如果有）
+	fundingReport := backtestEngine.GenerateFundingReportMarkdown()
+	if fundingReport != "" {
+		report += "\n---\n\n"
+		report += fundingReport
 	}
 
 	return report

@@ -136,24 +136,6 @@ func (pt *PositionTracker) ClosePosition(
 	return nil
 }
 
-// CloseAllPositions 平倉所有持倉（回測結束時使用）
-func (pt *PositionTracker) CloseAllPositions(
-	closePrice float64,
-	closeTime time.Time,
-	feeRate float64,
-) {
-	for _, position := range pt.openPositions {
-		// 計算盈虧
-		priceChange := closePrice - position.EntryPrice
-		profitBeforeFee := (priceChange / position.EntryPrice) * position.Size
-		fee := position.Size * feeRate * 2 // 開倉 + 平倉手續費
-		realizedPnL := profitBeforeFee - fee
-
-		// 平倉
-		pt.ClosePosition(position.ID, closePrice, closeTime, realizedPnL)
-	}
-}
-
 // GetOpenPositions 獲取所有未平倉持倉
 func (pt *PositionTracker) GetOpenPositions() []Position {
 	return pt.openPositions
@@ -181,9 +163,12 @@ func (pt *PositionTracker) CalculateAverageCost() float64 {
 
 // CalculateUnrealizedPnL 計算未實現盈虧（含預估平倉手續費）
 //
+// ⭐ 使用平均成本計算（avgCost），而非逐個倉位的入場價格
+// 這與 ShouldBreakEven 的計算邏輯一致，確保單一數據源
+//
 // 重要：開倉手續費已經在開倉時從餘額中扣除，不應該在這裡再扣一次！
 // UnrealizedPnL 只應該包含：
-//   1. 價格變化帶來的浮動盈虧
+//   1. 價格變化帶來的浮動盈虧（基於平均成本）
 //   2. 預估的平倉手續費（因為還沒平倉）
 //
 // currentPrice: 當前市場價格
@@ -193,27 +178,23 @@ func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate 
 		return 0
 	}
 
-	totalPnL := 0.0
+	// ⭐ 使用平均成本計算（基於币数的加权平均）
+	totalSize := pt.GetTotalSize() // 總倉位大小（USDT）
+	avgCost := pt.avgCost           // 累進平均成本
 
-	for _, pos := range pt.openPositions {
-		// ⭐ 1. 計算關閉的幣數（和 OrderSimulator 使用相同邏輯）
-		closedCoins := pos.Size / pos.EntryPrice
+	// ⭐ 計算價格變化比例
+	priceChange := currentPrice - avgCost
+	priceChangeRate := priceChange / avgCost
 
-		// ⭐ 2. 計算價格變化和盈虧（基於幣數）
-		priceChange := currentPrice - pos.EntryPrice
-		profitBeforeFee := closedCoins * priceChange
+	// ⭐ 計算未實現盈虧（扣費前）
+	unrealizedPnL := totalSize * priceChangeRate
 
-		// ⭐ 3. 計算平倉手續費（只計算平倉費，開倉費已經在開倉時扣過了）
-		closeValue := pos.Size + profitBeforeFee // 平倉時的總價值
-		closeFee := closeValue * feeRate         // 平倉手續費基於平倉價值
+	// ⭐ 計算預估平倉手續費
+	closeValue := totalSize + unrealizedPnL // 平倉時的總價值
+	closeFee := closeValue * feeRate        // 平倉手續費
 
-		// ⭐ 4. 未實現盈虧 = 浮動盈虧 - 預估平倉費（不包含開倉費）
-		pnl := profitBeforeFee - closeFee
-
-		totalPnL += pnl
-	}
-
-	return totalPnL
+	// ⭐ 未實現盈虧 = 浮動盈虧 - 預估平倉費
+	return unrealizedPnL - closeFee
 }
 
 // CalculateTotalRealizedPnL 計算總已實現盈虧

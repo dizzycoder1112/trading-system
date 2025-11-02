@@ -11,15 +11,16 @@ import (
 
 // GridConfig 網格策略配置
 type GridConfig struct {
-	InstID             string              // 交易對
-	PositionSize       float64             // 單次開倉大小（美元）
-	FeeRate            float64             // 手續費率（例: 0.0005 = 0.05%）
-	TakeProfitRateMin  float64             // 最小停利比例（例: 0.0015 = 0.15%）
-	TakeProfitRateMax  float64             // 最大停利比例（例: 0.002 = 0.2%）
-	BreakEvenProfitMin float64             // 盈虧平衡最小目標盈利（USDT）
-	BreakEvenProfitMax float64             // 盈虧平衡最大目標盈利（USDT）
-	TrendFilterConfig  TrendAnalyzerConfig // 趨勢過濾配置 ⭐
-	EnableTrendFilter  bool                // 是否啟用趨勢過濾 ⭐
+	InstID                string              // 交易對
+	PositionSize          float64             // 單次開倉大小（美元）
+	FeeRate               float64             // 手續費率（例: 0.0005 = 0.05%）
+	TakeProfitRateMin     float64             // 最小停利比例（例: 0.0015 = 0.15%）
+	TakeProfitRateMax     float64             // 最大停利比例（例: 0.002 = 0.2%）
+	BreakEvenProfitMin    float64             // 盈虧平衡最小目標盈利（USDT）
+	BreakEvenProfitMax    float64             // 盈虧平衡最大目標盈利（USDT）
+	TrendFilterConfig     TrendAnalyzerConfig // 趨勢過濾配置 ⭐
+	EnableTrendFilter     bool                // 是否啟用趨勢過濾 ⭐
+	EnableRedCandleFilter bool                // 是否啟用紅K過濾（虧損時只在紅K開倉）⭐
 }
 
 // OpenAdvice 開倉建議（領域值對象）
@@ -40,16 +41,17 @@ type OpenAdvice struct {
 // 3. 無狀態：不記錄 lastCandle（改為參數傳入）
 // 4. 不依賴任何技術實現
 type GridAggregate struct {
-	InstID             string
-	PositionSize       float64 // 單次開倉大小（美元）
-	FeeRate            float64 // 手續費率（例: 0.0005 = 0.05%）
-	TakeProfitRateMin  float64 // 最小停利比例（例: 0.0015 = 0.15%）
-	TakeProfitRateMax  float64 // 最大停利比例（例: 0.002 = 0.2%）
-	BreakEvenProfitMin float64 // 盈虧平衡最小目標盈利（USDT）
-	BreakEvenProfitMax float64 // 盈虧平衡最大目標盈利（USDT）
-	Calculator         *GridCalculator
-	TrendAnalyzer      *TrendAnalyzer // 趨勢分析器 ⭐
-	EnableTrendFilter  bool           // 是否啟用趨勢過濾 ⭐
+	InstID                string
+	PositionSize          float64 // 單次開倉大小（美元）
+	FeeRate               float64 // 手續費率（例: 0.0005 = 0.05%）
+	TakeProfitRateMin     float64 // 最小停利比例（例: 0.0015 = 0.15%）
+	TakeProfitRateMax     float64 // 最大停利比例（例: 0.002 = 0.2%）
+	BreakEvenProfitMin    float64 // 盈虧平衡最小目標盈利（USDT）
+	BreakEvenProfitMax    float64 // 盈虧平衡最大目標盈利（USDT）
+	Calculator            *GridCalculator
+	TrendAnalyzer         *TrendAnalyzer // 趨勢分析器 ⭐
+	EnableTrendFilter     bool           // 是否啟用趨勢過濾 ⭐
+	EnableRedCandleFilter bool           // 是否啟用紅K過濾（虧損時只在紅K開倉）⭐
 	// ❌ 移除 lastCandle（改為參數傳入，無狀態設計）
 }
 
@@ -64,38 +66,41 @@ func NewGridAggregate(config GridConfig) (*GridAggregate, error) {
 		return nil, errors.New("take profit rate min must be <= max")
 	}
 
-	if config.BreakEvenProfitMin < 0 || config.BreakEvenProfitMax < 0 {
-		return nil, errors.New("break even profit must be non-negative")
-	}
+	// if config.BreakEvenProfitMin < 0 || config.BreakEvenProfitMax < 0 {
+	// 	return nil, errors.New("break even profit must be non-negative")
+	// }
 
 	if config.BreakEvenProfitMin > config.BreakEvenProfitMax {
 		return nil, errors.New("break even profit min must be <= max")
 	}
 
 	return &GridAggregate{
-		InstID:             config.InstID,
-		PositionSize:       config.PositionSize,
-		FeeRate:            config.FeeRate,
-		TakeProfitRateMin:  config.TakeProfitRateMin,
-		TakeProfitRateMax:  config.TakeProfitRateMax,
-		BreakEvenProfitMin: config.BreakEvenProfitMin,
-		BreakEvenProfitMax: config.BreakEvenProfitMax,
-		Calculator:         NewGridCalculator(),
-		TrendAnalyzer:      NewTrendAnalyzer(config.TrendFilterConfig), // ⭐ 初始化趨勢分析器
-		EnableTrendFilter:  config.EnableTrendFilter,                   // ⭐ 是否啟用
+		InstID:                config.InstID,
+		PositionSize:          config.PositionSize,
+		FeeRate:               config.FeeRate,
+		TakeProfitRateMin:     config.TakeProfitRateMin,
+		TakeProfitRateMax:     config.TakeProfitRateMax,
+		BreakEvenProfitMin:    config.BreakEvenProfitMin,
+		BreakEvenProfitMax:    config.BreakEvenProfitMax,
+		Calculator:            NewGridCalculator(),
+		TrendAnalyzer:         NewTrendAnalyzer(config.TrendFilterConfig), // ⭐ 初始化趨勢分析器
+		EnableTrendFilter:     config.EnableTrendFilter,                   // ⭐ 是否啟用趨勢過濾
+		EnableRedCandleFilter: config.EnableRedCandleFilter,               // ⭐ 是否啟用紅K過濾
 	}, nil
 }
 
 // GetOpenAdvice 獲取開倉建議（被動諮詢方法）⭐
 // 參數：
 //   - currentPrice: 當前價格（Order Service 提供）
+//   - currentCandle: 當前 K 線（用於紅K過濾）⭐ 新增
 //   - lastCandle: 上一根 K 線（從 Redis 讀取）
 //   - candleHistories: K線歷史數據
-//   - positionSummary: 當前持倉摘要（用於盈虧平衡判斷）⭐ 新增
+//   - positionSummary: 當前持倉摘要（用於盈虧平衡判斷）⭐
 //
 // 返回：OpenAdvice（開倉建議）
 func (g *GridAggregate) GetOpenAdvice(
 	currentPrice value_objects.Price,
+	currentCandle value_objects.Candle,
 	lastCandle value_objects.Candle,
 	candleHistories []value_objects.Candle,
 	positionSummary value_objects.PositionSummary,
@@ -123,17 +128,11 @@ func (g *GridAggregate) GetOpenAdvice(
 	// 如果有未平倉位，優先檢查是否應該盈虧平衡退出
 	if !positionSummary.IsEmpty() {
 		// 判斷是否應該盈虧平衡退出
+
 		shouldExit, expectedProfit := positionSummary.ShouldBreakEven(
-			currentPrice.Value(),
-			g.FeeRate,
 			g.BreakEvenProfitMin,
 			g.BreakEvenProfitMax,
 		)
-
-		// shouldExit, expectedProfit := positionSummary.ShouldBreakEven2(
-		// 	g.BreakEvenProfitMin,
-		// 	g.BreakEvenProfitMax,
-		// )
 
 		if shouldExit {
 			// 應該盈虧平衡退出 - 不開新倉
@@ -149,7 +148,31 @@ func (g *GridAggregate) GetOpenAdvice(
 		}
 	}
 
-	// ========== 步驟 3: 正常開倉邏輯 ⭐ ==========
+	// ========== 步驟 3: 紅K過濾檢查（虧損時只在紅K開倉）⭐ ==========
+	if g.EnableRedCandleFilter && !positionSummary.IsEmpty() {
+		avgCost := positionSummary.AvgPrice
+		currentPriceValue := currentPrice.Value()
+
+		// 如果平均成本高於現價（持倉處於虧損），檢查當前K線顏色
+		if avgCost > currentPriceValue {
+			isRedCandle := currentCandle.Close().Value() < currentCandle.Open().Value() // 紅K = Close < Open
+			if !isRedCandle {
+				// 當前為綠K，虧損狀態下不允許開倉
+				return OpenAdvice{
+					ShouldOpen: false,
+					Reason: fmt.Sprintf(
+						"red_candle_filter: loss_state_green_candle (avgCost=%.2f, price=%.2f, close=%.2f, open=%.2f)",
+						avgCost,
+						currentPriceValue,
+						currentCandle.Close().Value(),
+						currentCandle.Open().Value(),
+					),
+				}
+			}
+		}
+	}
+
+	// ========== 步驟 4: 正常開倉邏輯 ⭐ ==========
 	// ✅ 使用 decimal 进行精确计算
 	currentPriceDecimal := decimal.NewFromFloat(currentPrice.Value())
 

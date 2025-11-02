@@ -764,6 +764,210 @@ advice := strategy.GetOpenAdvice(currentPrice, lastCandle, histories)
 
 ---
 
+### PnL vs PnL_Avg 使用情况分析 ⭐ Single Source of Truth 问题
+
+**问题发现日期**: 2025-11-02
+
+#### **背景**
+
+回测系统中，`OrderSimulator.SimulateClose()` 计算了**两种盈亏**：
+- **PnL**：基于单笔开仓价（`position.EntryPrice`）
+- **PnL_Avg**：基于平均成本（`avgCost`）
+
+这导致系统中存在**两条不同的盈亏统计路径**，违反 Single Source of Truth 原则。
+
+---
+
+#### **1. 计算位置**（单一来源）
+
+**位置**: `simulator/order_simulator.go:158-172`
+
+```go
+// 第158-161行：计算 PnL（基于单笔开仓价）
+priceChange := closePrice - position.EntryPrice
+pnlPercent := (priceChange / position.EntryPrice) * 100
+pnlAmount := closedCoins * priceChange
+
+// 第163-166行：计算 PnL_Avg（基于平均成本）
+priceChange_Avg := closePrice - avgCost
+pnlPercent_Avg := (priceChange_Avg / avgCost) * 100
+pnlAmount_Avg := closedCoins * priceChange_Avg
+
+// 第172行：realizedPnL 使用 PnL_Avg
+realizedPnL := pnlAmount_Avg - openFee - closeFee
+```
+
+---
+
+#### **2. 使用分支**（问题所在）
+
+##### **路径A：PnL（基于单笔开仓价）** ❌ 问题
+
+| 使用位置 | 代码行 | 用途 |
+|---------|--------|------|
+| `backtest_engine.go` | 256, 421 | `totalProfitGross += pnlAmount` |
+| CSV 输出 | 745 | `log.PnL` |
+| metrics 传递 | 669 | 传递给 `Calculate()` |
+
+**关键代码**：
+```go
+// backtest_engine.go:256
+totalProfitGross += pnlAmount // ❌ 使用基于单笔开仓价的盈亏
+```
+
+##### **路径B：PnL_Avg（基于平均成本）** ✅ 正确
+
+| 使用位置 | 代码行 | 用途 |
+|---------|--------|------|
+| realizedPnL | order_simulator.go:172 | 计算已实现盈亏 |
+| PositionTracker | backtest_engine.go:246 | 存储到 `ClosedPosition.RealizedPnL` |
+| 胜率计算 | position.go:240 | `if closed.RealizedPnL > 0` |
+| CSV 输出 | 748 | `log.PnL_Avg` |
+
+**关键代码**：
+```go
+// order_simulator.go:172, 184
+realizedPnL := pnlAmount_Avg - openFee - closeFee
+ClosedPosition.RealizedPnL = realizedPnL // ✅ 使用平均成本
+```
+
+---
+
+#### **3. 核心矛盾** ⚠️
+
+```
+已实现盈亏（realizedPnL）：
+    使用 PnL_Avg（平均成本）✅
+    ↓
+    用于胜率计算 ✅
+    累加到 PositionTracker ✅
+
+总利润统计（totalProfitGross）：
+    使用 PnL（单笔开仓价）❌
+    ↓
+    用于计算总盈利 ❌
+    传递给 metrics ❌
+```
+
+**问题**：
+1. **两套标准**：已实现盈亏用平均成本，总利润用单笔开仓价
+2. **不一致**：累加所有 `PnL` ≠ 累加所有 `RealizedPnL`
+3. **混淆**：CSV 同时输出 PnL 和 PnL_Avg，用户不知道该看哪个
+4. **维护困难**：如果修改盈亏计算，需要同步两个地方
+
+---
+
+#### **4. 影响范围**
+
+| 组件 | 受影响程度 | 说明 |
+|------|----------|------|
+| **OrderSimulator** | 🟡 中 | 同时计算两种盈亏 |
+| **PositionTracker** | ✅ 无影响 | 只使用 `RealizedPnL`（基于平均成本） |
+| **BacktestEngine** | 🔴 高 | `totalProfitGross` 使用错误的基准 |
+| **MetricsCalculator** | 🔴 高 | 接收错误的 `totalProfitGross` |
+| **CSV 输出** | 🟡 中 | 同时输出两个 PnL 列 |
+| **测试** | 🟢 低 | 测试只验证 `RealizedPnL` |
+
+---
+
+#### **5. 建议修复方案** ⭐
+
+##### **方案A：统一使用 PnL_Avg**（推荐）
+
+**修改 1：backtest_engine.go**
+```go
+// 第256行（修改前）
+totalProfitGross += pnlAmount  // ❌ 基于单笔开仓价
+
+// 第256行（修改后）
+totalProfitGross += pnlAmount_Avg  // ✅ 统一使用平均成本
+```
+
+**修改 2：CSV 输出简化**
+```go
+// 第733行（修改前）
+"TradeID,...,PnL%,PnL,AvgCost,PnL%_Avg,PnL_Avg,..."
+
+// 第733行（修改后）
+"TradeID,...,AvgCost,PnL%,PnL,..."  // 删除重复列，重命名 PnL_Avg 为 PnL
+```
+
+**修改 3：删除 PnL 字段**（可选）
+```go
+// order_simulator.go:33-34（删除）
+PnL        float64 // ❌ 删除
+PnLPercent float64 // ❌ 删除
+
+// 只保留 PnL_Avg（或重命名为 PnL）
+PnL_Avg        float64 // ✅ 保留
+PnLPercent_Avg float64 // ✅ 保留
+```
+
+##### **方案B：只修改统计逻辑**（最小改动）
+
+只修改 `backtest_engine.go:256` 和 `:421`，其他保持不变：
+```go
+totalProfitGross += pnlAmount_Avg  // 改这一行即可
+```
+
+---
+
+#### **6. 修改清单**
+
+| 文件 | 行号 | 修改内容 | 优先级 |
+|------|-----|---------|--------|
+| `engine/backtest_engine.go` | 256, 421 | `pnlAmount` → `pnlAmount_Avg` | 🔴 **必须** |
+| `engine/backtest_engine.go` | 233-234 | 删除 `pnlAmount`, `pnlPercent` 变量（可选） | 🟡 可选 |
+| `engine/backtest_engine.go` | 290, 503 | 删除 `log.PnL`, `log.PnLPercent`（可选） | 🟡 可选 |
+| `engine/backtest_engine.go` | 733 | CSV header 简化（可选） | 🟡 可选 |
+| `simulator/order_simulator.go` | 33-34 | 删除 `PnL`, `PnLPercent` 字段（可选） | 🟢 可选 |
+
+---
+
+#### **7. 验证方法**
+
+修改后验证：
+1. **一致性检查**：
+   ```go
+   totalProfitGross_新 == positionTracker.CalculateTotalRealizedPnL()
+   ```
+
+2. **回测结果对比**：
+   - 运行修改前后的回测
+   - 对比 `totalProfitGross`、`netProfit` 等指标
+   - 确认结果符合预期
+
+3. **CSV 验证**：
+   - 如果删除了 PnL 列，确认 CSV 仍然包含所有必要信息
+
+---
+
+#### **8. 为什么当初设计两套？**
+
+**可能的原因**：
+1. **初期设计**：想同时记录两种基准，方便对比分析
+2. **历史遗留**：最初可能只有 PnL，后来添加了 PnL_Avg
+3. **未统一**：不同模块各自发展，没有统一标准
+
+**当前问题**：
+- ❌ 增加复杂度
+- ❌ 容易混淆
+- ❌ 违反 Single Source of Truth
+- ❌ 维护困难
+
+**解决方案**：
+- ✅ 统一到 PnL_Avg（基于平均成本）
+- ✅ 删除或弃用 PnL（基于单笔开仓价）
+- ✅ 简化 CSV 输出
+
+---
+
+**状态**: ⚠️ **待修复**（高优先级）
+
+**相关问题**: 参见 `apps/trading-strategy-server/CLAUDE.md` 的 "问题1: PnL vs PnL_Avg 两套并行计算"
+
+---
+
 ## 📊 歷史數據
 
 ### 已下載數據
