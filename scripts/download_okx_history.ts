@@ -7,9 +7,11 @@
  * npx tsx scripts/download_okx_history.ts \
  *   --inst-id=ETH-USDT-SWAP \
  *   --bar=5m \
- *   --after=2025-10-01T00:00:00 \
- *   --before=2025-10-26T00:00:00
+ *   --after=2025-10-01T00:00:00Z \
+ *   --before=2025-10-26T00:00:00Z
  */
+
+const outputDir = 'data';
 
 interface OKXCandleResponse {
   code: string;
@@ -35,7 +37,7 @@ const MAX_LIMIT = 300; // OKX 每次最多返回 300 條
 function parseArgs(): DownloadOptions {
   const args = process.argv.slice(2);
   const options: Partial<DownloadOptions> = {
-    outputDir: 'apps/trading-strategy-server/data',
+    outputDir,
   };
 
   for (const arg of args) {
@@ -212,27 +214,29 @@ async function downloadAllCandles(options: DownloadOptions): Promise<string[][]>
 }
 
 /**
- * 生成文件夾名稱
- * 格式: 20240930-20241001-5m-ETH-USDT-SWAP
+ * 生成文件路徑
+ * 格式: {outputDir}/{dateRange}/{instId}/{bar}/history.json
+ * 例如: data/20251029-20251030/ETH-USDT-SWAP/5m/history.json
  */
-function generateFolderName(options: DownloadOptions): string {
-  const { instId, bar, after, before } = options;
+function generateFilePath(options: DownloadOptions): string {
+  const { instId, bar, after, before, outputDir } = options;
 
   const afterDate = new Date(after).toISOString().split('T')[0].replace(/-/g, '');
   const beforeDate = new Date(before).toISOString().split('T')[0].replace(/-/g, '');
 
-  return `${afterDate}-${beforeDate}-${bar}-${instId}`;
+  const dateRange = `${afterDate}-${beforeDate}`;
+
+  return `${outputDir}/${dateRange}/${instId}/${bar}`;
 }
 
 /**
  * 保存數據到文件
- * 輸出路徑: {outputDir}/{folderName}/histories.json
- * 例如: apps/trading-strategy-server/data/20240930-20241001-5m-ETH-USDT-SWAP/histories.json
+ * 輸出路徑: {outputDir}/{dateRange}/{instId}/{bar}/history.json
+ * 例如: data/20251029-20251030/ETH-USDT-SWAP/5m/history.json
  */
 async function saveToFile(options: DownloadOptions, data: string[][]): Promise<void> {
-  const folderName = generateFolderName(options);
-  const folderPath = `${options.outputDir}/${folderName}`;
-  const filepath = `${folderPath}/histories.json`;
+  const folderPath = generateFilePath(options);
+  const filepath = `${folderPath}/history.json`;
 
   const output: OKXCandleResponse = {
     code: '0',

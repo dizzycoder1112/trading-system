@@ -20,3 +20,4 @@ bin
 # 測試覆蓋率
 *.out
 coverage.txt
+data
