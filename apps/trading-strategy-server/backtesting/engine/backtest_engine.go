@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/csv"
 	"fmt"
 	"os"
 	"time"
@@ -55,14 +56,15 @@ type BreakEvenRound struct {
 	EndTime              time.Time // 輪次結束時間（打平觸發時間）
 	Duration             string    // 持續時長
 	TotalOpenCount       int       // 本輪總開倉次數
-	TotalCloseCount      int       // 本輪總關倉次數
+	NormalCloseCount     int       // 正常止盈關倉次數 ⭐
+	BreakEvenCloseCount  int       // 打平強制關倉次數 ⭐
+	TotalCloseCount      int       // 總關倉次數（正常 + 打平）⭐
 	RealizedPnL          float64   // 本輪已實現盈虧（扣除手續費）
 	UnrealizedPnL        float64   // 觸發時的未實現盈虧
 	ExpectedProfit       float64   // 預期總盈利（實現+未實現）
 	TotalFees            float64   // 本輪總手續費
 	TriggerPrice         float64   // 觸發打平時的價格
 	AvgCost              float64   // 平均成本
-	PositionsClosedCount int       // 打平時平掉的倉位數
 }
 
 // FundingRecord 自動注資記錄 ⭐
@@ -80,11 +82,17 @@ type FundingRecord struct {
 
 // RoundStats 當前輪次統計
 type RoundStats struct {
-	RoundID          int       // 當前輪次編號
-	StartTime        time.Time // 輪次開始時間
-	OpenCount        int       // 本輪開倉次數
-	CloseCount       int       // 本輪關倉次數
-	TotalFeesInRound float64   // 本輪累積手續費
+	RoundID               int       // 當前輪次編號
+	StartTime             time.Time // 輪次開始時間
+	OpenCount             int       // 本輪開倉次數
+	NormalCloseCount      int       // 正常止盈關倉次數 ⭐
+	BreakEvenCloseCount   int       // 打平強制關倉次數 ⭐
+	TotalFeesInRound      float64   // 本輪累積手續費
+}
+
+// GetTotalCloseCount 獲取總關倉次數（正常 + 打平）
+func (rs *RoundStats) GetTotalCloseCount() int {
+	return rs.NormalCloseCount + rs.BreakEvenCloseCount
 }
 
 // TradeLog 交易日誌（用於 debug）
@@ -188,6 +196,7 @@ func (e *BacktestEngine) executeClose(
 	reason string,
 	balance *float64,
 	totalProfitGross *float64,
+	totalProfitGross_Entry *float64, // ⭐ 新增：基于单笔开仓价的总利润
 	totalFeesClose *float64,
 	openPositionValue *float64,
 	currentRoundRealizedPnL *float64,
@@ -224,8 +233,12 @@ func (e *BacktestEngine) executeClose(
 	// 4. 更新余额
 	*balance += revenue
 
-	// 5. 累加统计数据（使用基于平均成本的盈亏）⭐
-	*totalProfitGross += pnlAmount_Avg
+	// 5. 累加统计数据
+	// 注意：同时追踪两种总利润
+	// - totalProfitGross: 基于平均成本（反映真实账户表现）
+	// - totalProfitGross_Entry: 基于单笔开仓价（反映策略触发表现）
+	*totalProfitGross += pnlAmount_Avg // 基于平均成本
+	*totalProfitGross_Entry += pnlAmount // 基于单笔开仓价 ⭐
 	*totalFeesClose += closeFee
 
 	// 6. 更新当前交易轮次数据
@@ -290,10 +303,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 	tradeCounter := 0 // 交易計數器
 
 	// ⭐ 追蹤統計數據
-	totalOpenedTrades := 0  // 總開倉數量
-	totalProfitGross := 0.0 // 總利潤（未扣手續費）
-	totalFeesOpen := 0.0    // 開倉總手續費
-	totalFeesClose := 0.0   // 關倉總手續費
+	totalOpenedTrades := 0        // 總開倉數量
+	totalProfitGross := 0.0       // 總利潤（基於平均成本，未扣手續費）
+	totalProfitGross_Entry := 0.0 // 總利潤（基於單筆開倉價，未扣手續費）⭐ 新增
+	totalFeesOpen := 0.0          // 開倉總手續費
+	totalFeesClose := 0.0         // 關倉總手續費
 
 	// ⭐ 追蹤當前交易輪次數據（用於打平機制）
 	openPositionValue := 0.0       // 累計持倉總價值（USDT）
@@ -335,6 +349,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
 					&balance,
 					&totalProfitGross,
+					&totalProfitGross_Entry, // ⭐ 新增
 					&totalFeesClose,
 					&openPositionValue,
 					&currentRoundRealizedPnL,
@@ -346,6 +361,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					// 平倉失敗，記錄錯誤但繼續
 					continue
 				}
+
+				// ⭐ 更新正常關倉計數
+				e.currentRoundStats.NormalCloseCount++
+				closeFee := (pos.Size + (currentPrice.Value()-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
+				e.currentRoundStats.TotalFeesInRound += closeFee
 
 				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）
 				if openPositionValue <= 0.01 { // 使用小值避免浮點誤差
@@ -411,7 +431,6 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			copy(positionsToClose, e.positionTracker.GetOpenPositions())
 
 			// ⭐ 記錄本輪打平前的狀態
-			beforeClosePositionCount := len(positionsToClose)
 			beforeCloseRealizedPnL := currentRoundRealizedPnL
 			beforeCloseUnrealizedPnL := unrealizedPnL
 
@@ -425,6 +444,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					gridAdvice.Reason, // 使用打平退出原因
 					&balance,
 					&totalProfitGross,
+					&totalProfitGross_Entry, // ⭐ 新增
 					&totalFeesClose,
 					&openPositionValue,
 					&currentRoundRealizedPnL,
@@ -437,7 +457,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				}
 
 				// ⭐ 打平机制特有：更新当前轮次统计
-				e.currentRoundStats.CloseCount++
+				e.currentRoundStats.BreakEvenCloseCount++
 				closeFee := (pos.Size + (currentPrice.Value()-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
 				e.currentRoundStats.TotalFeesInRound += closeFee
 
@@ -451,19 +471,20 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					}
 
 					round := BreakEvenRound{
-						RoundID:              e.currentRoundStats.RoundID,
-						StartTime:            e.currentRoundStats.StartTime,
-						EndTime:              currentTime,
-						Duration:             currentTime.Sub(e.currentRoundStats.StartTime).String(),
-						TotalOpenCount:       e.currentRoundStats.OpenCount,
-						TotalCloseCount:      e.currentRoundStats.CloseCount,
-						RealizedPnL:          beforeCloseRealizedPnL,   // 打平前的已實現盈虧
-						UnrealizedPnL:        beforeCloseUnrealizedPnL, // 打平前的未實現盈虧
-						ExpectedProfit:       beforeCloseRealizedPnL + beforeCloseUnrealizedPnL,
-						TotalFees:            e.currentRoundStats.TotalFeesInRound,
-						TriggerPrice:         currentPrice.Value(),
-						AvgCost:              avgCostAtThisTime,
-						PositionsClosedCount: beforeClosePositionCount,
+						RoundID:             e.currentRoundStats.RoundID,
+						StartTime:           e.currentRoundStats.StartTime,
+						EndTime:             currentTime,
+						Duration:            currentTime.Sub(e.currentRoundStats.StartTime).String(),
+						TotalOpenCount:      e.currentRoundStats.OpenCount,
+						NormalCloseCount:    e.currentRoundStats.NormalCloseCount,      // 正常止盈關倉數 ⭐
+						BreakEvenCloseCount: e.currentRoundStats.BreakEvenCloseCount,  // 打平強制關倉數 ⭐
+						TotalCloseCount:     e.currentRoundStats.GetTotalCloseCount(), // 總關倉數 ⭐
+						RealizedPnL:         beforeCloseRealizedPnL,                    // 打平前的已實現盈虧
+						UnrealizedPnL:       beforeCloseUnrealizedPnL,                  // 打平前的未實現盈虧
+						ExpectedProfit:      beforeCloseRealizedPnL + beforeCloseUnrealizedPnL,
+						TotalFees:           e.currentRoundStats.TotalFeesInRound,
+						TriggerPrice:        currentPrice.Value(),
+						AvgCost:             avgCostAtThisTime,
 					}
 					e.breakEvenRounds = append(e.breakEvenRounds, round)
 
@@ -651,6 +672,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		lastPrice,
 		totalOpenedTrades,
 		totalProfitGross,
+		totalProfitGross_Entry, // ⭐ 新增：基于单笔开仓价的总利润
 		totalFeesOpen,
 		totalFeesClose,
 	)
@@ -710,6 +732,76 @@ func (e *BacktestEngine) GetTotalFees() float64 {
 		totalFees += log.Fee
 	}
 	return totalFees
+}
+
+// ExportRoundsToCSV 導出打平輪次詳細記錄到 CSV 文件 ⭐
+func (e *BacktestEngine) ExportRoundsToCSV(filePath string) error {
+	if len(e.breakEvenRounds) == 0 {
+		return nil // 沒有輪次記錄，跳過
+	}
+
+	// 創建文件
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create CSV file: %w", err)
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// 寫入 CSV 標題
+	header := []string{
+		"RoundID",
+		"StartTime",
+		"EndTime",
+		"Duration",
+		"TotalOpenCount",
+		"NormalCloseCount",
+		"BreakEvenCloseCount",
+		"TotalCloseCount",
+		"RealizedPnL",
+		"UnrealizedPnL",
+		"ExpectedProfit",
+		"TotalFees",
+		"TriggerPrice",
+		"AvgCost",
+		"Status",
+	}
+	if err := writer.Write(header); err != nil {
+		return fmt.Errorf("failed to write CSV header: %w", err)
+	}
+
+	// 寫入每輪數據
+	for _, round := range e.breakEvenRounds {
+		status := "profit"
+		if round.ExpectedProfit < 0 {
+			status = "loss"
+		}
+
+		row := []string{
+			fmt.Sprintf("%d", round.RoundID),
+			round.StartTime.Format("2006-01-02 15:04:05"),
+			round.EndTime.Format("2006-01-02 15:04:05"),
+			round.Duration,
+			fmt.Sprintf("%d", round.TotalOpenCount),
+			fmt.Sprintf("%d", round.NormalCloseCount),
+			fmt.Sprintf("%d", round.BreakEvenCloseCount),
+			fmt.Sprintf("%d", round.TotalCloseCount),
+			fmt.Sprintf("%.2f", round.RealizedPnL),
+			fmt.Sprintf("%.2f", round.UnrealizedPnL),
+			fmt.Sprintf("%.2f", round.ExpectedProfit),
+			fmt.Sprintf("%.2f", round.TotalFees),
+			fmt.Sprintf("%.2f", round.TriggerPrice),
+			fmt.Sprintf("%.2f", round.AvgCost),
+			status,
+		}
+		if err := writer.Write(row); err != nil {
+			return fmt.Errorf("failed to write CSV row: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // ExportTradeLogCSV 導出交易日誌到 CSV 文件
@@ -775,7 +867,7 @@ func (e *BacktestEngine) printBreakEvenRoundsReport() {
 		totalProfit += round.ExpectedProfit
 		totalFees += round.TotalFees
 		totalTrades += round.TotalOpenCount + round.TotalCloseCount
-		releasePosition := float64(round.PositionsClosedCount) * e.config.PositionSize
+		releasePosition := float64(round.BreakEvenCloseCount) * e.config.PositionSize
 		if releasePosition > maxReleasePosition {
 			maxReleasePosition = releasePosition
 		}
@@ -894,7 +986,7 @@ func (e *BacktestEngine) GenerateBreakEvenReportMarkdown() string {
 	for _, round := range e.breakEvenRounds {
 		totalProfit += round.ExpectedProfit
 		totalFees += round.TotalFees
-		releasePosition := float64(round.PositionsClosedCount) * e.config.PositionSize
+		releasePosition := float64(round.BreakEvenCloseCount) * e.config.PositionSize
 		if releasePosition > maxReleasePosition {
 			maxReleasePosition = releasePosition
 		}
@@ -922,34 +1014,13 @@ func (e *BacktestEngine) GenerateBreakEvenReportMarkdown() string {
 	content += fmt.Sprintf("- **盈利輪次**: %d (%.1f%%)\n", profitRounds, float64(profitRounds)/float64(len(e.breakEvenRounds))*100)
 	content += fmt.Sprintf("- **虧損輪次**: %d (%.1f%%)\n\n", lossRounds, float64(lossRounds)/float64(len(e.breakEvenRounds))*100)
 
-	// 詳細輪次記錄
+	// 詳細輪次記錄說明
 	content += "### 詳細輪次記錄\n\n"
-	content += "| 輪次 | 開始時間 | 結束時間 | 持續時長 | 開倉數 | 關倉數 | 已實現盈虧 | 未實現盈虧 | 預期總盈利 | 總手續費 | 平倉數量 | 狀態 |\n"
-	content += "|------|---------|---------|---------|--------|--------|-----------|-----------|-----------|---------|---------|------|\n"
+	content += fmt.Sprintf("⭐ **輪次詳細記錄已導出到 CSV 文件**（共 %d 輪）\n", len(e.breakEvenRounds))
+	content += "- 文件名: `rounds_detail.csv`\n"
+	content += "- 包含字段: 輪次編號、時間、開關倉數、盈虧、手續費等\n"
+	content += "- 可使用 Excel/Numbers 打開查看和分析\n\n"
 
-	for _, round := range e.breakEvenRounds {
-		status := "✅ 保本/盈利"
-		if round.ExpectedProfit < 0 {
-			status = "❌ 虧損"
-		}
-
-		content += fmt.Sprintf("| %d | %s | %s | %s | %d | %d | $%.2f | $%.2f | $%.2f | $%.2f | %d | %s |\n",
-			round.RoundID,
-			round.StartTime.Format("2006-01-02 15:04"),
-			round.EndTime.Format("2006-01-02 15:04"),
-			round.Duration,
-			round.TotalOpenCount,
-			round.TotalCloseCount,
-			round.RealizedPnL,
-			round.UnrealizedPnL,
-			round.ExpectedProfit,
-			round.TotalFees,
-			round.PositionsClosedCount,
-			status,
-		)
-	}
-
-	content += "\n"
 	return content
 }
 

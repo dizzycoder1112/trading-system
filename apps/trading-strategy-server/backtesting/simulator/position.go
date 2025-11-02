@@ -30,6 +30,7 @@ type PositionTracker struct {
 	nextID          int              // 用於生成持倉ID
 	avgCost         float64          // ⭐ 累進的平均成本
 	totalCoins      float64          // ⭐ 總持倉幣數
+	pnlCalculator   *PnLCalculator   // 盈虧計算器 ⭐ Single Source of Truth
 }
 
 // NewPositionTracker 創建倉位追蹤器
@@ -40,6 +41,7 @@ func NewPositionTracker() *PositionTracker {
 		nextID:          1,
 		avgCost:         0,
 		totalCoins:      0,
+		pnlCalculator:   NewPnLCalculator(), // 初始化盈虧計算器 ⭐
 	}
 }
 
@@ -182,9 +184,9 @@ func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate 
 	totalSize := pt.GetTotalSize() // 總倉位大小（USDT）
 	avgCost := pt.avgCost           // 累進平均成本
 
-	// ⭐ 計算價格變化比例
-	priceChange := currentPrice - avgCost
-	priceChangeRate := priceChange / avgCost
+	// ⭐ 使用 PnLCalculator 計算價格變化率 (Single Source of Truth)
+	// 參數名清楚表明：基於平均成本計算未實現盈虧
+	priceChangeRate := pt.pnlCalculator.CalculatePriceChangeRate(currentPrice, avgCost)
 
 	// ⭐ 計算未實現盈虧（扣費前）
 	unrealizedPnL := totalSize * priceChangeRate

@@ -340,6 +340,14 @@ func exportResults(
 		fmt.Printf("✅ 回測報告已導出: %s\n", reportPath)
 	}
 
+	// 4. 導出打平輪次詳細記錄 (CSV) ⭐
+	roundsCSVPath := filepath.Join(fullPath, "rounds_detail.csv")
+	if err := backtestEngine.ExportRoundsToCSV(roundsCSVPath); err != nil {
+		fmt.Printf("❌ 無法導出輪次 CSV: %v\n", err)
+	} else if _, err := os.Stat(roundsCSVPath); err == nil {
+		fmt.Printf("✅ 輪次詳細記錄已導出: %s\n", roundsCSVPath)
+	}
+
 	fmt.Printf("\n📁 所有文件已保存到文件夾: %s/\n", fullPath)
 }
 
@@ -388,7 +396,8 @@ func generateReport(
 
 	// 交易統計
 	report += "## 📈 交易統計\n\n"
-	report += fmt.Sprintf("- **總利潤**: $%.2f USDT 💸 (未扣手續費)\n", result.TotalProfitGross)
+	report += fmt.Sprintf("- **總利潤(基於平均成本)**: $%.2f USDT 💸 (未扣手續費)\n", result.TotalProfitGross)
+	report += fmt.Sprintf("- **總利潤 (基於單筆開倉價)**: $%.2f USDT 💸 (未扣手續費) ⭐\n", result.TotalProfitGross_Entry)
 	report += fmt.Sprintf("- **總手續費**: $%.2f USDT 💸 (開倉: $%.2f, 關倉: $%.2f)\n",
 		result.TotalFeesPaid, result.TotalFeesOpen, result.TotalFeesClose)
 	report += fmt.Sprintf("- **未實現盈虧**: $%.2f USDT", result.UnrealizedPnL)

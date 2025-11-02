@@ -10,8 +10,9 @@ import (
 
 // OrderSimulator 成交模擬器
 type OrderSimulator struct {
-	feeRate  float64 // OKX taker 手續費: 0.05% (0.0005)
-	slippage float64 // 滑點（簡單版設為 0）
+	feeRate       float64        // OKX taker 手續費: 0.05% (0.0005)
+	slippage      float64        // 滑點（簡單版設為 0）
+	pnlCalculator *PnLCalculator // 盈虧計算器 ⭐ Single Source of Truth
 }
 
 // OpenAdvice 開倉建議（與 strategy-server 保持一致）
@@ -46,8 +47,9 @@ type CloseResult struct {
 // NewOrderSimulator 創建成交模擬器
 func NewOrderSimulator(feeRate, slippage float64) *OrderSimulator {
 	return &OrderSimulator{
-		feeRate:  feeRate,
-		slippage: slippage,
+		feeRate:       feeRate,
+		slippage:      slippage,
+		pnlCalculator: NewPnLCalculator(), // 初始化盈虧計算器 ⭐
 	}
 }
 
@@ -155,15 +157,21 @@ func (s *OrderSimulator) SimulateClose(
 	// 該筆開倉實際買入的幣數 = Size / EntryPrice
 	closedCoins := position.Size / position.EntryPrice
 
-	// ⭐ 3. 計算基於單筆開倉價的盈虧
-	priceChange := closePrice - position.EntryPrice
-	pnlPercent := (priceChange / position.EntryPrice) * 100 // 百分比
-	pnlAmount := closedCoins * priceChange                  // 金額（未扣手續費）
+	// ⭐ 3. 使用 PnLCalculator 計算兩套盈虧 (Single Source of Truth)
+	//
+	// 3.1 基於單筆開倉價的盈虧（用於分析單笔交易表現）
+	pnlAmount, pnlPercent := s.pnlCalculator.CalculatePnL(
+		closePrice,
+		position.EntryPrice, // 參數名清楚表明：基於開倉價
+		closedCoins,
+	)
 
-	// ⭐ 4. 計算基於平均成本的盈虧（使用相同的幣數，但不同的成本基準）
-	priceChange_Avg := closePrice - avgCost
-	pnlPercent_Avg := (priceChange_Avg / avgCost) * 100 // 百分比
-	pnlAmount_Avg := closedCoins * priceChange_Avg      // 金額（未扣手續費）
+	// 3.2 基於平均成本的盈虧（用於真實賬戶盈虧計算）⭐ 核心計算
+	pnlAmount_Avg, pnlPercent_Avg := s.pnlCalculator.CalculatePnL(
+		closePrice,
+		avgCost, // 參數名清楚表明：基於平均成本
+		closedCoins,
+	)
 
 	// ⭐ 5. 計算平倉時的實際價值和手續費
 	closeValue := position.Size + pnlAmount        // 平倉時的總價值（本金 + 盈虧）

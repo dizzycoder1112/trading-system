@@ -136,19 +136,27 @@ func TestNetProfitCalculation_VerifyFeeAccounting(t *testing.T) {
 	t.Logf("  currentPrice = %.2f", currentPrice)
 	t.Logf("  unrealizedPnL = %.4f USDT (已扣預估平倉費，未扣開倉費)", unrealizedPnL)
 
-	// ===== 步驟 6: 驗證淨利潤計算 =====
+	// ===== 步驟 6: 驗證淨利潤計算 (使用 Calculator) ⭐ Single Source of Truth
 	t.Logf("\n========== 費用統計 ==========")
 	t.Logf("totalProfitGross = %.4f USDT (已平倉毛利)", totalProfitGross)
 	t.Logf("totalFeesOpen    = %.4f USDT (3筆開倉費)", totalFeesOpen)
 	t.Logf("totalFeesClose   = %.4f USDT (2筆平倉費)", totalFeesClose)
 	t.Logf("unrealizedPnL    = %.4f USDT (1筆未實現盈虧，已扣預估平倉費)", unrealizedPnL)
 
-	// 計算淨利潤（使用正確的公式）
-	netProfit := totalProfitGross + unrealizedPnL - totalFeesOpen - totalFeesClose
+	// 使用 Calculator.Calculate() 計算淨利潤 ⭐ 不重複實現公式
+	result := calculator.Calculate(
+		positionTracker,
+		balance,
+		currentPrice,
+		3, // totalOpenedTrades
+		totalProfitGross,
+		totalProfitGross, // totalProfitGross_Entry (測試中兩者相同)
+		totalFeesOpen,
+		totalFeesClose,
+	)
+	netProfit := result.NetProfit
 
-	t.Logf("\n========== 淨利潤計算 ==========")
-	t.Logf("公式: NetProfit = TotalProfitGross + UnrealizedPnL - TotalFeesOpen - TotalFeesClose")
-	t.Logf("NetProfit = %.4f + %.4f - %.4f - %.4f", totalProfitGross, unrealizedPnL, totalFeesOpen, totalFeesClose)
+	t.Logf("\n========== 淨利潤計算 (通過 Calculator) ==========")
 	t.Logf("NetProfit = %.4f USDT", netProfit)
 
 	// 驗證：淨利潤應該等於 (最終總權益 - 初始資金)
@@ -174,29 +182,5 @@ func TestNetProfitCalculation_VerifyFeeAccounting(t *testing.T) {
 		t.Errorf("  差異: %.6f USDT", diff)
 	} else {
 		t.Logf("\n✅ 淨利潤計算正確：%.4f USDT", netProfit)
-	}
-
-	// ===== 步驟 7: 測試 MetricsCalculator =====
-	result := calculator.Calculate(
-		positionTracker,
-		balance,
-		currentPrice,
-		3, // totalOpenedTrades
-		totalProfitGross,
-		totalFeesOpen,
-		totalFeesClose,
-	)
-
-	t.Logf("\n========== MetricsCalculator 結果 ==========")
-	t.Logf("NetProfit (calculator) = %.4f USDT", result.NetProfit)
-	t.Logf("NetProfit (expected)   = %.4f USDT", expectedNetProfit)
-
-	if diff := result.NetProfit - expectedNetProfit; diff > 0.0001 || diff < -0.0001 {
-		t.Errorf("MetricsCalculator 計算錯誤！")
-		t.Errorf("  實際: %.4f USDT", result.NetProfit)
-		t.Errorf("  預期: %.4f USDT", expectedNetProfit)
-		t.Errorf("  差異: %.6f USDT", diff)
-	} else {
-		t.Logf("\n✅ MetricsCalculator 計算正確")
 	}
 }

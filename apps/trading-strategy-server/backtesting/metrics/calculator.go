@@ -21,12 +21,13 @@ type BacktestResult struct {
 	FullPositionDays     int     // 持倉全滿的天數 ⭐ 新增
 
 	// 交易統計
-	TotalProfitGross float64       // 總利潤（未扣手續費的價差盈利）⭐ 新增
-	TotalFeesOpen    float64       // 開倉總手續費 ⭐ 新增
-	TotalFeesClose   float64       // 關倉總手續費 ⭐ 新增
-	TotalFeesPaid    float64       // 總手續費（開倉 + 關倉）
-	UnrealizedPnL    float64       // 未實現盈虧（含預估關倉手續費）⭐
-	NetProfit        float64       // 淨利潤 = 總利潤 + 未實現盈虧 - 總手續費 ⭐
+	TotalProfitGross       float64 // 總利潤-基於平均成本（未扣手續費）⭐
+	TotalProfitGross_Entry float64 // 總利潤-基於單筆開倉價（未扣手續費）⭐ 新增
+	TotalFeesOpen          float64 // 開倉總手續費 ⭐ 新增
+	TotalFeesClose         float64 // 關倉總手續費 ⭐ 新增
+	TotalFeesPaid          float64 // 總手續費（開倉 + 關倉）
+	UnrealizedPnL          float64 // 未實現盈虧（含預估關倉手續費）⭐
+	NetProfit              float64 // 淨利潤 = 總利潤 + 未實現盈虧 - 總手續費 ⭐
 	TotalReturn      float64       // 總收益率 (%)
 	ProfitFactor     float64       // 盈虧比（含未實現盈虧）⭐
 	WinRate          float64       // 勝率 (%)
@@ -88,6 +89,7 @@ func (mc *MetricsCalculator) Calculate(
 	lastPrice float64,
 	totalOpenedTrades int,
 	totalProfitGross float64,
+	totalProfitGross_Entry float64, // ⭐ 新增：基于单笔开仓价的总利润
 	totalFeesOpen float64,
 	totalFeesClose float64,
 ) BacktestResult {
@@ -106,15 +108,8 @@ func (mc *MetricsCalculator) Calculate(
 	// 2. 計算總手續費
 	totalFeesPaid := totalFeesOpen + totalFeesClose
 
-	// 3. 計算淨利潤 ⭐ 正確公式
-	// NetProfit = TotalProfitGross + UnrealizedPnL - TotalFeesPaid
-	//
-	// 說明：
-	// - totalProfitGross: 已平倉的毛利潤（未扣任何費用）
-	// - unrealizedPnL: 未平倉的盈虧（已扣預估平倉費，但未扣開倉費）
-	// - totalFeesPaid: 所有已支付費用（已平倉開倉費 + 已平倉平倉費 + 未平倉開倉費）
-	//
-	// 注意：unrealizedPnL 內部已扣除未平倉的預估平倉費，所以這裡不需要重複扣
+	// 3. 計算淨利潤 ⭐
+	// NetProfit = 已平倉淨利潤 + 未平倉淨盈虧
 	netProfit := totalProfitGross + unrealizedPnL - totalFeesPaid
 
 	// 4. 计算总权益（可用余额 + 未平仓价值 + 未实现盈亏）
@@ -185,12 +180,13 @@ func (mc *MetricsCalculator) Calculate(
 		OpenPositionValue: openPositionValue,
 
 		// 交易統計
-		TotalProfitGross: totalProfitGross,
-		TotalFeesOpen:    totalFeesOpen,
-		TotalFeesClose:   totalFeesClose,
-		TotalFeesPaid:    totalFeesPaid,
-		UnrealizedPnL:    unrealizedPnL,
-		NetProfit:        netProfit,
+		TotalProfitGross:       totalProfitGross,
+		TotalProfitGross_Entry: totalProfitGross_Entry, // ⭐ 新增
+		TotalFeesOpen:          totalFeesOpen,
+		TotalFeesClose:         totalFeesClose,
+		TotalFeesPaid:          totalFeesPaid,
+		UnrealizedPnL:          unrealizedPnL,
+		NetProfit:              netProfit,
 		TotalReturn:      totalReturn,
 		ProfitFactor:     profitFactor,
 		WinRate:          winRate,
