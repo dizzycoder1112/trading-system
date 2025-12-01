@@ -2,7 +2,7 @@
 
 回測結果視覺化工具，用於顯示 K 線圖、交易標記與平均成本線。
 
-![Chart Dashboard 截圖](./screenshot/Screenshot.png)
+![Chart Dashboard 截圖](./screenshot/screenshot.png)
 
 ## 啟動
 

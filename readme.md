@@ -234,6 +234,6 @@ pnpm dev      # 啟動開發服務器 (http://localhost:5173)
 
 **預覽**：
 
-![Chart Dashboard 截圖](./apps/chart-dashboard/screenshot/Screenshot.png)
+![Chart Dashboard 截圖](./apps/chart-dashboard/screenshot/screenshot.png)
 
 > 詳細說明請參考 [apps/chart-dashboard/README.md](./apps/chart-dashboard/README.md)
