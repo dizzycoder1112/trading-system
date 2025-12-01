@@ -72,7 +72,6 @@ go build -o bin/backtest cmd/backtest/main.go
   --take-profit-min=0.002 \
   --take-profit-max=0.003 \
   --break-even-profit-min=1 \
-  --break-even-profit-max=20 \
   --enable-trend-filter=true \
   --enable-red-candle-filter=true \
   --enable-auto-funding=true \
@@ -91,8 +90,8 @@ go build -o bin/backtest cmd/backtest/main.go
 | `--take-profit-min` | 0.0015 | 最小止盈百分比 (0.15%) |
 | `--take-profit-max` | 0.01 | 最大止盈百分比 (1%) |
 | `--break-even-profit-min` | -0.1 | 打平最小目標盈利 (USDT) |
-| `--break-even-profit-max` | 20.0 | 打平最大目標盈利 (USDT) |
-| `--enable-trend-filter` | false | 是否啟用趨勢過濾 ⭐ |
+| `--break-even-profit-max` | 20.0 | ⚠️ Deprecated，目前未使用 |
+| `--enable-trend-filter` | false | 是否啟用趨勢過濾（實測會降低獲利，不建議啟用）|
 | `--enable-red-candle-filter` | true | 虧損時只在紅K開倉 ⭐ |
 | `--enable-auto-funding` | true | 是否啟用自動注資 ⭐ |
 | `--auto-funding-amount` | 5000 | 自動注資金額 (USDT) |
