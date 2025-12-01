@@ -112,6 +112,70 @@ func (s *RedisStorage) AppendCandleHistory(ctx context.Context, candle okx.Candl
 	return nil
 }
 
+// ========== Pub/Sub 推送（Push 模式，保留接口）==========
+
+// PublishPrice 推送价格到 Pub/Sub 频道
+//
+// channel 格式: market.ticker.{instId}
+// 目前未启用，保留接口供未来使用
+func (s *RedisStorage) PublishPrice(ctx context.Context, ticker okx.Ticker) error {
+	channel := fmt.Sprintf(ChannelPatternTicker, ticker.InstID)
+
+	// 序列化为 JSON
+	data, err := json.Marshal(ticker)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ticker: %w", err)
+	}
+
+	// 发布到 Redis Pub/Sub
+	if err := s.client.Publish(ctx, channel, data).Err(); err != nil {
+		s.logger.Error("Failed to publish price to channel",
+			"error", err,
+			"channel", channel,
+			"instId", ticker.InstID)
+		return fmt.Errorf("failed to publish price: %w", err)
+	}
+
+	s.logger.Debug("Published price to channel",
+		"channel", channel,
+		"instId", ticker.InstID,
+		"last", ticker.Last)
+
+	return nil
+}
+
+// PublishCandle 推送 K 线到 Pub/Sub 频道
+//
+// channel 格式: market.candle.{bar}.{instId}
+// 目前未启用，保留接口供未来使用
+func (s *RedisStorage) PublishCandle(ctx context.Context, candle okx.Candle) error {
+	channel := fmt.Sprintf(ChannelPatternCandle, candle.Bar, candle.InstID)
+
+	// 序列化为 JSON
+	data, err := json.Marshal(candle)
+	if err != nil {
+		return fmt.Errorf("failed to marshal candle: %w", err)
+	}
+
+	// 发布到 Redis Pub/Sub
+	if err := s.client.Publish(ctx, channel, data).Err(); err != nil {
+		s.logger.Error("Failed to publish candle to channel",
+			"error", err,
+			"channel", channel,
+			"instId", candle.InstID,
+			"bar", candle.Bar)
+		return fmt.Errorf("failed to publish candle: %w", err)
+	}
+
+	s.logger.Debug("Published candle to channel",
+		"channel", channel,
+		"instId", candle.InstID,
+		"bar", candle.Bar,
+		"confirm", candle.Confirm)
+
+	return nil
+}
+
 // Cleanup 清理所有市场数据（关机时调用）
 //
 // 清理以下 key pattern：

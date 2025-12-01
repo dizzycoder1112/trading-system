@@ -24,7 +24,6 @@ func main() {
 
 	log.Info("Starting Market Data Service", map[string]any{
 		"environment": cfg.Environment,
-		"port":        cfg.Port,
 	})
 
 	// 3. 創建 Redis 客戶端（直接返回 *redis.Client）

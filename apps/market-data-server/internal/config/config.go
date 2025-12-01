@@ -9,7 +9,6 @@ import (
 )
 
 type Config struct {
-	Port        string
 	Environment string
 	LogLevel    string
 	OKX         OKXConfig
@@ -51,7 +50,6 @@ func Load() *Config {
 	subscription := parseSubscriptionSelection()
 
 	cfg := &Config{
-		Port:        requireEnv("PORT"),
 		Environment: requireEnv("ENVIRONMENT"),
 		LogLevel:    getEnvOrDefault("LOG_LEVEL", "info"),
 		OKX: OKXConfig{
