@@ -1,92 +1,237 @@
-# 🧱 Dockerize Monorepo Structure with Golang and TypeScript
+# Trading System - QuantScalper
 
-Welcome to the **ultimate monorepo template** — designed for **high-performance services**, clean architecture, and **maximum developer experience**.
+量化剝頭皮交易系統，採用微服務架構 + DDD 設計。
 
-> ✨ Perfect for microservices, modular APIs, or scaling teams with shared utilities.
+## 策略定位
 
-## ⚡️ Key Features
+**QuantScalper** 是中頻量化短線策略，不是高頻交易 (HFT)。
 
-1. Dockerize Monorepo Structure could be implemented by containers, keep the local environment clean and consistent with the production environment.
+| 特徵 | 高頻交易 (HFT) | QuantScalper |
+|------|---------------|--------------|
+| **決策頻率** | 毫秒級，每秒數百次 | 每 5 分鐘一次 |
+| **持倉時間** | 毫秒~秒 | 秒~小時 |
+| **平倉方式** | 主動微秒級平倉 | 被動止盈觸發 |
+| **基礎設施** | 機房託管、FPGA、專線 | 雲服務器、WebSocket |
+| **競爭維度** | 比誰更快 | 比誰判斷更準 |
 
-2. Watching the packages changes, it could keep builded files as needed and hot reload.
+## 核心邏輯
 
-3. Dependency Injection and Factory Pattern could be used to manage the dependencies of the services, let the program more flexible and easy to test.
+每 5 分鐘 K 線收盤時：
+```
+1. 計算開倉點位 = 收盤價 × 0.999（低於市價 0.1%）
+2. 掛限價買單 + 對應止盈單
+3. 等待成交（被動掛單）
+4. 5 分鐘內只持有一個倉位
+5. 止盈成交後立刻再開新倉（最大化交易量）
+```
 
-4. log-tool CLI tools shows each app's logs in terminal by selecting app.
+**設計目標**：防守型策略，主要收益來自 40% 手續費回佣，止盈是保護機制。
 
-## 📂 Project Structure
+## 策略特徵
+
+| 特徵 | 傳統 Grid | QuantScalper |
+|------|----------|--------------|
+| 方向 | ❌ 無方向性 | 純做多（做空為獨立策略） |
+| 開倉點位 | 固定價格網格線 | 動態（收盤價 - 0.1%） |
+| 止盈方式 | 固定間距 | 動態止盈 (0.15%~0.2%) |
+| 避險機制 | ❌ | ✅ 紅K過濾（虧損時只在紅K收盤開倉） |
+| 開倉節奏 | 價格觸發 | 固定每 5 分鐘一倉（擼手續費回佣） |
+
+## 策略參數
+
+| 參數 | 值 | 說明 |
+|------|---|------|
+| 開倉點位 | 收盤價 × 0.999 | 低於市價 0.1% 掛限價單 |
+| 止盈範圍 | 0.15% ~ 0.2% | 動態調整（基於波動率） |
+| 倉位大小 | $200 USDT | 固定倉位 |
+| 盈虧平衡 | 1~20 USDT | 總盈虧達標則退出 |
+
+> **命名說明**：程式碼中策略類型為 `grid`，因為 QuantScalper 本質上是改良版網格策略。
+
+---
+
+## 系統架構
+
+Dockerized Monorepo 微服務架構，Golang + TypeScript。
 
 ```
-root/
-├── ts-packages/
-│ └── shared/
-│   └── src/
-│     ├──constants/
-│     └── utils/
-│ └── logger/
-│   └── src/
-│ └── db/
-│   └── src/
-│ └── grpc/
-│   └── src/
-├── go-packages/
-│ └── grpc/
-├── apps/
-│ └── ts-restful-api/
-│   ├── src/
-│   ├── tsconfig.json
-│   └── tsconfig.prod.json
-├── tsconfig.json
-├── buf.gen.yaml
-├── buf.yaml
-└── pnpm-workspace.yaml
+=== 即時交易系統 ===
+
+┌─────────────┐   SET/LPUSH  ┌─────────────────────────────────┐
+│ market-data │─────────────▶│             Redis               │
+│   server    │              │  (Price Oracle / KV Store)      │
+│    (Go)     │              └─────────────────────────────────┘
+└──────┬──────┘                        ▲
+       │                               │ GET/LRANGE
+       ▼                  (optional)   │
+   ┌───────┐                 ┌─────────┴─────────┐
+   │  OKX  │                 │                   │
+   │  WS   │                 │                   │
+   └───────┘                 ▼                   ▼
+                    ┌───────────────┐    ┌─────────────┐
+                    │   trading-    │◀───│   order-    │
+                    │   strategy-   │gRPC│   server    │
+                    │    server     │    │    (Go)     │
+                    │  (Go / DDD)   │    └──────┬──────┘
+                    │  [Stateless]  │           │
+                    └───────────────┘           ▼
+                                           ┌────────┐
+    Order 輪詢 Strategy 詢問開倉建議          │  OKX   │
+    Strategy 無狀態，只負責計算               │  API   │
+                                           └────────┘
+
+=== 回測 & 視覺化 (獨立) ===
+
+┌───────────────┐  export   ┌─────────────────┐
+│   trading-    │──────────▶│ chart-dashboard │
+│   strategy-   │  (JSON)   │  (TypeScript)   │
+│     server    │           │                 │
+│               │           │  (Vite-React)   │
+│               │           │                 │
+│               │           └─────────────────┘
+│   /backtest   │
+└───────────────┘
+```
+
+## 服務列表 (`apps/`)
+
+| 服務 | 語言 | 架構 | 狀態 | 說明 |
+|-----|------|-----|------|-----|
+| **market-data-server** | Go | Layered | 🟢 Core | OKX WebSocket 即時行情接收，存儲至 Redis |
+| **trading-strategy-server** | Go | **DDD** | 🟢 Core | 策略引擎 + 回測系統 |
+| **order-server** | Go | Layered | ⚪ Planned | 訂單執行服務（僅 gRPC proto 定義） |
+| **chart-dashboard** | TypeScript | Vite + React | 🟢 Core | K 線圖表前端 |
+
+> **狀態說明**
+>
+> 🟢 Core = 核心功能完成，持續優化中
+>
+> 🟡 Scaffold = 骨架建立，功能開發中
+>
+> ⚪ Planned = 規劃中
+
+> **開發重心**
+>
+> 目前專注於**回測系統**的策略驗證，待回測結果滿意後，再將邏輯遷移至即時策略引擎。
+>
+> `backtest/` → 驗證完成 → `strategy/`
+
+---
+
+## 資料流說明
+
+### 1. market-data-server (Price Oracle)
+
+**職責**：即時行情接收與存儲
+
+```
+OKX WebSocket API
+    │
+    │ Subscribe: tickers, candles
+    ▼
+┌─────────────────────┐
+│  market-data-server │
+│                     │
+│  • 接收即時價格       │
+│  • 接收 K 線數據      │
+│  • 格式化後存儲       │
+└──────────┬──────────┘
+           │
+           │ SET / LPUSH
+           ▼
+┌─────────────────────┐
+│   Redis (KV Store)  │
+│                     │
+│  • price.latest.*   │  ← String (SET)
+│  • candle.latest.*  │  ← String (SET)
+│  • candle.history.* │  ← List (LPUSH)
+└─────────────────────┘
+           │
+           │ GET / LRANGE (optional)
+           ▼
+    其他服務可讀取
+```
+
+**Redis 存儲**：
+| Key Pattern | 類型 | 說明 |
+|-------------|------|-----|
+| `price.latest.{instId}` | String | 即時價格 (TTL 60s) |
+| `candle.latest.{bar}.{instId}` | String | 最新 K 線 (動態 TTL) |
+| `candle.history.{bar}.{instId}` | List | 歷史 K 線 (LPUSH, 保留 N 根) |
+
+**啟動**：
+```bash
+cd apps/market-data-server && go run ./cmd/main.go
+```
+
+> 詳細配置與架構請參考 [apps/market-data-server/README.md](./apps/market-data-server/README.md)
+
+---
+
+### 2. 歷史資料下載器 (scripts)
+
+**職責**：下載 OKX 歷史 K 線數據，供回測使用
+
+```
+OKX REST API
+    │
+    │ GET /api/v5/market/history-candles
+    ▼
+┌─────────────────────────┐
+│  download_okx_history   │
+│                         │
+│  • 分頁下載歷史 K 線       │
+│  • Rate Limit 處理       │
+│  • 自動重試機制           │
+└───────────┬─────────────┘
+            │
+            │ Export
+            ▼
+┌─────────────────────────┐
+│     data/{日期範圍}/     │
+│     {instId}/{bar}/     │
+│       history.json      │
+└─────────────────────────┘
+```
+
+**啟動**：
+```bash
+pnpm download:okx \
+  --inst-id=ETH-USDT-SWAP \
+  --bar=5m \
+  --after=2022-01-01T00:00:00Z \
+  --before=2022-12-31T00:00:00Z
+```
+
+**輸出格式**：
+```
+data/20220101-20221231/ETH-USDT-SWAP/5m/history.json
 ```
 
 ---
 
-## 🛠 Usage
+### 3. trading-strategy-server (策略引擎 + 回測系統)
 
-### 1️⃣ Install Dependencies
+**職責**：策略計算與信號生成（DDD 架構）
 
-```bash
-pnpm install
-```
+#### 策略引擎 (即時模式)
 
-### 2️⃣ Start in Development
-
-⚠️caution: please ensure docker is installed and running.
-
-📝description: this dev mode was powered by docker continaer, and watch the packages changes to rebuild and restart the services by turbo.
+> 需先啟動 `market-data-server` 才能從 Redis 讀取價格
 
 ```bash
-pnpm run start:dev
+cd apps/trading-strategy-server
+cp .env.example .env
+go run ./cmd/strategy/main.go
 ```
 
-watch the logs by using log-tool
+#### 回測系統
 
 ```bash
-pnpm run log-tool
-```
-![Screenshot 2025-05-13 at 20 39 44](https://github.com/user-attachments/assets/00c495aa-d560-43f5-bdad-be9148a0c7ed)
-
-### 3️⃣ Build All Packages
-
-```
-pnpm run build
+cd apps/trading-strategy-server
+go run ./cmd/backtest/main.go --data=../../data/xxx/history.json
 ```
 
+查看完整參數：`go run ./cmd/backtest/main.go --help`
 
+> 詳細架構請參考 [apps/trading-strategy-server/CLAUDE.md](./apps/trading-strategy-server/CLAUDE.md)
 
-## Else
-
-### GRPC generate
-
-```bash
-brew install bufbuild/buf/buf
-pnpm setup
-pnpm run buf:gen
-```
-
-## 💻 Contribution
-
-Feel free to fork, improve, and submit PRs. Let’s make scalable backend monorepos easy for everyone 💪.

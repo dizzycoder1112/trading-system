@@ -338,12 +338,12 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 
 		// 注意：先檢查平倉，再考慮開倉（避免資金不足）
 		for _, pos := range positionsToCheck {
-			// ⭐ 檢查是否觸及目標平倉價格
-			if currentPrice.Value() >= pos.TargetClosePrice {
-				// ⭐ 使用提取的辅助函数执行平仓
+			// ⭐ 檢查是否觸及目標平倉價格（使用 High 價格）
+			if currentCandle.High().Value() >= pos.TargetClosePrice {
+				// ⭐ 使用提取的辅助函数执行平仓（使用止盈價）
 				err := e.executeClose(
 					pos,
-					currentPrice.Value(),
+					pos.TargetClosePrice, // ⭐ 修正：使用止盈價而不是收盤價
 					currentTime,
 					avgCostAtThisTime,
 					fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
@@ -364,7 +364,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 
 				// ⭐ 更新正常關倉計數
 				e.currentRoundStats.NormalCloseCount++
-				closeFee := (pos.Size + (currentPrice.Value()-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
+				closeFee := (pos.Size + (pos.TargetClosePrice-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
 				e.currentRoundStats.TotalFeesInRound += closeFee
 
 				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）

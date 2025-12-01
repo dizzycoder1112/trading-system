@@ -21,7 +21,7 @@ func main() {
 	instID := flag.String("inst-id", "ETH-USDT-SWAP", "交易對")
 	takeProfitMin := flag.Float64("take-profit-min", 0.0015, "最小止盈百分比 (默認: 0.0015 = 0.15%)")
 	takeProfitMax := flag.Float64("take-profit-max", 0.01, "最大止盈百分比 (默認: 0.0020 = 0.20%)")
-	breakEvenProfitMin := flag.Float64("break-even-profit-min", -0.1, "打平最小目標盈利 (USDT, 默認: 0)")
+	breakEvenProfitMin := flag.Float64("break-even-profit-min", 0.0, "打平最小目標盈利 (USDT, 默認: 0)")
 	breakEvenProfitMax := flag.Float64("break-even-profit-max", 20.0, "打平最大目標盈利 (USDT, 默認: 20)")
 	enableTrendFilter := flag.Bool("enable-trend-filter", false, "是否啟用趨勢過濾 (默認: false) ⭐")
 	enableRedCandleFilter := flag.Bool("enable-red-candle-filter", true, "是否啟用紅K過濾（虧損時只在紅K開倉，默認: true）⭐")

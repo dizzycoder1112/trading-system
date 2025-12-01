@@ -211,49 +211,307 @@ for i, candle := range candles {
 
 ---
 
-## 🎯 待優化功能
+## 🎯 當前改進任務 ⭐ 2025-11-03
 
-### 1. 支持 1 分鐘 K 線數據（更精確的回測）⭐
+### 優先級 1：平倉檢查邏輯修正（高優先級）
 
-**當前問題**：5分鐘K線顆粒度較粗，錯過快速波動
+**問題**：當前回測引擎使用 `Close` 價格檢查平倉，不夠準確
+
+**影響**：
+- ❌ 錯過 K 線內部的止盈觸發
+- ❌ 平倉價格不準確（應該用止盈價，而不是收盤價）
+- ❌ 回測結果偏離真實交易表現
 
 **改進方案**：
-- 下載 1 分鐘 K 線歷史數據
-- **用1分K的收盤價模擬5分K內的交易** ⭐
-- 每根5分K內包含5根1分K，可以更精確地捕捉價格變化
-- 使用相同的回測引擎（無需修改核心邏輯）
 
-**實現邏輯**：
 ```go
-// 讀取1分K線數據
-candles1m := loader.LoadFromJSON("data/1m-ETH-USDT-SWAP.json")
+// 當前實現（不準確）
+if currentCandle.Close() >= pos.TargetClosePrice {
+    closePosition(pos, currentCandle.Close())  // ❌ 使用收盤價
+}
 
-// 每根5分K = 5根1分K
-for i := 0; i < len(candles1m); i += 5 {
-    // 取5根1分K的收盤價進行模擬
-    for j := 0; j < 5 && i+j < len(candles1m); j++ {
-        currentPrice := candles1m[i+j].Close()
+// 應該改為（更準確）
+if currentCandle.High() >= pos.TargetClosePrice {
+    closePosition(pos, pos.TargetClosePrice)  // ✅ 使用止盈價
+}
+```
 
-        // 檢查平倉
-        checkClose(positions, currentPrice)
+**原因**：
+- K 線的 `High` 表示該時段內的最高價
+- 如果 `High >= 止盈價`，說明價格已經觸及止盈
+- 止盈是限價單，觸及即成交，成交價應該是止盈價
 
-        // 檢查開倉
-        if shouldOpen(currentPrice) {
-            openPosition(currentPrice)
+**相關文件**：
+- `backtesting/engine/backtest_engine.go:326-376`
+
+**狀態**：待實現 ⭐
+
+---
+
+### 優先級 2：參數化混合時間框架回測 ⭐ 已確認設計
+
+**目標**：使用更細粒度的 K 線作為輸入源，保持固定的交易節奏
+
+**核心設計**：
+
+#### 1. 參數配置
+
+```go
+type BacktestConfig struct {
+    // ... 現有配置
+
+    // 新增 ⭐
+    TickBarSize    int  // 輸入K線周期（秒），例如：60 = 1分K, 1 = 1秒K
+    CooldownPeriod int  // 冷卻時間（秒），決定固定開倉節奏，例如：300 = 5分鐘
+}
+```
+
+**示例配置**：
+
+```go
+// 示例1: 1分K + 5分鐘冷卻（默認）
+config := BacktestConfig{
+    TickBarSize:    60,   // 1分鐘 = 60秒
+    CooldownPeriod: 300,  // 5分鐘 = 300秒
+    // 聚合：300/60 = 5根1分K → 5分K
+}
+
+// 示例2: 1分K + 3分鐘冷卻
+config := BacktestConfig{
+    TickBarSize:    60,   // 1分鐘
+    CooldownPeriod: 180,  // 3分鐘
+    // 聚合：180/60 = 3根1分K → 3分K
+}
+
+// 示例3: 1秒K + 5分鐘冷卻（未來支持）
+config := BacktestConfig{
+    TickBarSize:    1,    // 1秒
+    CooldownPeriod: 300,  // 5分鐘
+    // 聚合：300/1 = 300根1秒K → 5分K
+}
+```
+
+#### 2. CLI 參數
+
+```bash
+go run cmd/backtest/main.go \
+  --data=data/1m-ETH-USDT-SWAP.json \
+  --tick-bar-size=60 \
+  --cooldown-period=300
+```
+
+**向後兼容** ⭐：
+- 如果不提供 `--tick-bar-size` 和 `--cooldown-period`，使用當前 K 線的時間周期
+- 例如：`data/5m-ETH-USDT-SWAP.json` → 自動設置 `TickBarSize=300`, `CooldownPeriod=300`
+- 保持現有回測行為不變
+
+**驗證規則** ⭐：
+- 必須滿足：`CooldownPeriod % TickBarSize == 0`
+- 避免無法整除的情況（例如：60秒tick + 70秒冷卻）
+
+#### 3. 開倉規則（兩種時機）
+
+**規則 A: 冷卻邊界開倉**（固定節奏）
+- 每 `CooldownPeriod` 秒無條件詢問策略一次
+- 無論當前有多少個持倉
+- 使用聚合的 K 線供策略決策
+- 使用當前 tick K 線的收盤價作為 `currentPrice`
+
+**規則 B: 平倉後立即重開**（額外機會）
+- 任何時刻平倉後立即詢問策略
+- 使用當前 tick K 線（**不聚合**）⭐
+- 使用當前 tick K 線的收盤價作為 `currentPrice`
+- 不影響冷卻邊界的固定節奏
+
+**時間線示例（1分K + 5分鐘冷卻）**：
+```
+時間: 00:00  00:01  00:02  00:03  00:04  00:05  00:06  00:07
+     [1分K] [1分K] [1分K] [1分K] [1分K] [1分K] [1分K] [1分K]
+     └────────5分K1──────────┘  └────────5分K2──────────┘
+
+00:00 冷卻邊界（5分K邊界）→ 開倉A（固定節奏）
+      持倉：[A]
+
+00:02 檢查平倉 → A觸及止盈，平倉A
+      平倉後立即詢問策略（使用當前1分K）→ 開倉B（額外機會）
+      持倉：[B]
+
+00:05 冷卻邊界（5分K邊界）→ 開倉C（固定節奏，無論B是否還在）
+      持倉：[B, C]  ⭐ 同時持有2個
+
+00:07 檢查平倉 → B觸及止盈，平倉B
+      平倉後立即詢問策略 → 開倉D（額外機會）
+      持倉：[C, D]  ⭐ 同時持有2個
+```
+
+#### 4. 平倉規則（每根 tick K 檢查）
+
+- 使用 tick K 線的 `High` 價格檢查是否觸及止盈
+- 使用止盈價平倉（而不是收盤價或 High）
+- 平倉後立即觸發**規則 B**（詢問策略是否重開）
+
+#### 5. 動態 K 線聚合
+
+```go
+// 聚合任意數量的K線
+func aggregateCandles(candles []value_objects.Candle) (value_objects.Candle, error) {
+    if len(candles) == 0 {
+        return nil, fmt.Errorf("需要至少1根K線")
+    }
+
+    // 只有1根K線，直接返回
+    if len(candles) == 1 {
+        return candles[0], nil
+    }
+
+    open := candles[0].Open()
+    close := candles[len(candles)-1].Close()
+
+    // 找最高價和最低價
+    high := candles[0].High()
+    low := candles[0].Low()
+
+    for i := 1; i < len(candles); i++ {
+        if candles[i].High().Value() > high.Value() {
+            high = candles[i].High()
         }
+        if candles[i].Low().Value() < low.Value() {
+            low = candles[i].Low()
+        }
+    }
+
+    timestamp := candles[len(candles)-1].Timestamp()
+
+    return value_objects.NewCandle(open, high, low, close, timestamp), nil
+}
+```
+
+#### 6. 主循環實現偽代碼
+
+```go
+func (e *BacktestEngine) Run(candles []value_objects.Candle) {
+    aggregationCount := e.config.CooldownPeriod / e.config.TickBarSize
+
+    for i := 0; i < len(candles); i++ {
+        currentCandle := candles[i]
+        currentTime := currentCandle.Timestamp()
+
+        // === 步驟 1: 檢查平倉（每根tick K）===
+        beforeCloseCount := len(openPositions)
+
+        for _, pos := range openPositions {
+            if currentCandle.High().Value() >= pos.TargetClosePrice {
+                closePosition(pos, pos.TargetClosePrice, currentTime)
+            }
+        }
+
+        afterCloseCount := len(openPositions)
+        justClosed := (beforeCloseCount > afterCloseCount)
+
+        // === 步驟 2: 開倉檢查 ===
+
+        // 情況A: 平倉後立即重開（使用當前單根K線，不聚合）
+        if justClosed {
+            currentPrice := currentCandle.Close()
+
+            advice := strategy.GetOpenAdvice(currentPrice, currentCandle, ...)
+
+            if advice.ShouldOpen {
+                openPosition(advice, advice.OpenPrice, currentTime)
+            }
+        }
+
+        // 情況B: 冷卻邊界固定開倉
+        if e.isCooldownBoundary(i) {
+            // 獲取需要聚合的K線範圍
+            candlesToAggregate := e.getAggregationRange(i, candles)
+
+            // 聚合K線
+            aggregatedCandle, err := aggregateCandles(candlesToAggregate)
+            if err != nil {
+                continue
+            }
+
+            currentPrice := currentCandle.Close()
+
+            advice := strategy.GetOpenAdvice(currentPrice, aggregatedCandle, ...)
+
+            if advice.ShouldOpen {
+                openPosition(advice, advice.OpenPrice, currentTime)
+            }
+        }
+    }
+}
+
+// 判斷是否為冷卻邊界
+func (e *BacktestEngine) isCooldownBoundary(index int) bool {
+    aggregationCount := e.config.CooldownPeriod / e.config.TickBarSize
+
+    if index < aggregationCount-1 {
+        return false
+    }
+
+    return index % aggregationCount == (aggregationCount - 1)
+}
+
+// 獲取需要聚合的K線範圍
+func (e *BacktestEngine) getAggregationRange(index int, candles []value_objects.Candle) []value_objects.Candle {
+    aggregationCount := e.config.CooldownPeriod / e.config.TickBarSize
+
+    start := index - aggregationCount + 1
+    if start < 0 {
+        start = 0
+    }
+
+    return candles[start:index+1]
+}
+```
+
+#### 7. 掛單邏輯（簡化處理）⭐
+
+**當前階段**：假設所有掛單都成交（不檢查 `Low` 價格）
+
+```go
+// 簡化版本（當前實現）
+if advice.ShouldOpen {
+    openPosition(advice, advice.OpenPrice)  // 假設成交
+}
+```
+
+**未來改進**（低優先級）：
+```go
+// 完整版本（未來改進）
+if advice.ShouldOpen {
+    if currentCandle.Low() <= advice.OpenPrice {
+        openPosition(advice, advice.OpenPrice)  // ✅ 成交
+    } else {
+        // ❌ 未成交，跳過（不保留掛單）
     }
 }
 ```
 
-**優勢**：
-- ✅ 更接近真實交易（每分鐘都有機會觸發）
-- ✅ 捕捉更細緻的價格變化
-- ✅ 減少未觸發止盈的情況
-- ✅ 回測結果更準確
+**為什麼是低優先級**：
+- 策略的掛單價格通常很接近當前價（0.1%），成交概率高
+- 對回測結果影響相對較小
 
-**注意事項**：
-- ⚠️ 數據量增加5倍，回測時間會變長
-- ⚠️ 需要下載對應時間範圍的1分K線數據
+#### 8. 持倉管理
+
+- ✅ **允許同時持有多個倉位**（如果止盈不觸發，倉位會累積）
+- ✅ **冷卻期內只開倉一次**（邊界時刻的固定開倉）
+- ✅ **額外開倉不計入節奏**（平倉後的重開）
+- ⚠️ 倉位增長由其他機制保護（餘額限制、打平機制等）
+
+#### 9. 優勢
+
+- ✅ **通用性**：支持任意時間框架組合（1秒K、1分K、5分K等）
+- ✅ **靈活性**：可以輕鬆調整冷卻時間測試不同策略
+- ✅ **可擴展**：未來可以支持秒K、分鐘K、小時K等
+- ✅ **向後兼容**：默認參數保持現有行為不變
+- ✅ **更頻繁的平倉檢查**：每根tick K檢查一次
+- ✅ **更準確的平倉價格**：使用止盈價而非收盤價
+- ✅ **平倉後立即重開**：不錯過交易機會
+
+**狀態**：設計已確認 ✅，待實現
 
 ---
 
