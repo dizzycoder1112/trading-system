@@ -9,18 +9,18 @@ import (
 	"dizzycoder.xyz/market-data-service/internal/storage"
 )
 
-// TickerHandler Ticker 数据处理器
+// TickerHandler Ticker 數據處理器
 //
-// 职责：
-// - 接收 OKX Ticker 数据
-// - 调用 storage 保存最新价格
-// - 不包含存储实现细节（依赖抽象接口）
+// 職責：
+// - 接收 OKX Ticker 數據
+// - 調用 storage 保存最新價格
+// - 不包含存儲實現細節（依賴抽象接口）
 type TickerHandler struct {
-	storage storage.MarketDataStorage // 依赖抽象接口
+	storage storage.MarketDataStorage // 依賴抽象接口
 	logger  logger.Logger
 }
 
-// NewTickerHandler 创建 Ticker 处理器
+// NewTickerHandler 創建 Ticker 處理器
 func NewTickerHandler(storage storage.MarketDataStorage, logger logger.Logger) *TickerHandler {
 	return &TickerHandler{
 		storage: storage,
@@ -28,7 +28,7 @@ func NewTickerHandler(storage storage.MarketDataStorage, logger logger.Logger) *
 	}
 }
 
-// Handle 处理 Ticker 数据
+// Handle 處理 Ticker 數據
 func (h *TickerHandler) Handle(ticker okx.Ticker) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
