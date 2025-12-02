@@ -156,6 +156,7 @@ OKX REST API
 **啟動**：
 
 ```bash
+pnpm install
 pnpm download:okx \
   --inst-id=ETH-USDT-SWAP \
   --bar=5m \
