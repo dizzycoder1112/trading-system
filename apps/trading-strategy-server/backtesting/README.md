@@ -16,7 +16,7 @@
 cd apps/trading-strategy-server
 
 # 基本使用（使用默認參數）
-go run ./cmd/backtest/main.go --data=../../data/xxx/history.json
+go run ./cmd/backtest/main.go --data=/path/to/data/xxx/history.json
 
 # 自定義參數（使用絕對路徑）
 go run ./cmd/backtest/main.go \

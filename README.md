@@ -190,7 +190,7 @@ go run ./cmd/strategy/main.go
 
 ```bash
 cd apps/trading-strategy-server
-go run ./cmd/backtest/main.go --data=../../data/xxx/history.json
+go run ./cmd/backtest/main.go --data=/path/to/data/xxx/history.json
 ```
 
 查看完整參數：`go run ./cmd/backtest/main.go --help`
