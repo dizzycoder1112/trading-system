@@ -193,6 +193,8 @@ cd apps/trading-strategy-server
 go run ./cmd/backtest/main.go --data=/path/to/data/xxx/history.json
 ```
 
+> ⚠️ `--data` 參數需使用絕對路徑
+
 查看完整參數：`go run ./cmd/backtest/main.go --help`
 
 > 詳細說明請參考 [apps/trading-strategy-server/README.md](./apps/trading-strategy-server/README.md)

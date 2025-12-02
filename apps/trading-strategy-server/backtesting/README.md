@@ -18,7 +18,7 @@ cd apps/trading-strategy-server
 # 基本使用（使用默認參數）
 go run ./cmd/backtest/main.go --data=/path/to/data/xxx/history.json
 
-# 自定義參數（使用絕對路徑）
+# 自定義參數
 go run ./cmd/backtest/main.go \
   --data=/path/to/data/20211031-20221031/ETH-USDT-SWAP/5m/history.json \
   --initial-balance=20000 \
@@ -32,6 +32,8 @@ go run ./cmd/backtest/main.go \
   --auto-funding-amount=5000 \
   --auto-funding-idle=288
 ```
+
+> ⚠️ `--data` 參數需使用絕對路徑
 
 查看完整參數：`go run ./cmd/backtest/main.go --help`
 
