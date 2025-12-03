@@ -51,20 +51,20 @@ type BacktestEngine struct {
 
 // BreakEvenRound 打平輪次記錄
 type BreakEvenRound struct {
-	RoundID              int       // 輪次編號
-	StartTime            time.Time // 輪次開始時間
-	EndTime              time.Time // 輪次結束時間（打平觸發時間）
-	Duration             string    // 持續時長
-	TotalOpenCount       int       // 本輪總開倉次數
-	NormalCloseCount     int       // 正常止盈關倉次數 ⭐
-	BreakEvenCloseCount  int       // 打平強制關倉次數 ⭐
-	TotalCloseCount      int       // 總關倉次數（正常 + 打平）⭐
-	RealizedPnL          float64   // 本輪已實現盈虧（扣除手續費）
-	UnrealizedPnL        float64   // 觸發時的未實現盈虧
-	ExpectedProfit       float64   // 預期總盈利（實現+未實現）
-	TotalFees            float64   // 本輪總手續費
-	TriggerPrice         float64   // 觸發打平時的價格
-	AvgCost              float64   // 平均成本
+	RoundID             int       // 輪次編號
+	StartTime           time.Time // 輪次開始時間
+	EndTime             time.Time // 輪次結束時間（打平觸發時間）
+	Duration            string    // 持續時長
+	TotalOpenCount      int       // 本輪總開倉次數
+	NormalCloseCount    int       // 正常止盈關倉次數 ⭐
+	BreakEvenCloseCount int       // 打平強制關倉次數 ⭐
+	TotalCloseCount     int       // 總關倉次數（正常 + 打平）⭐
+	RealizedPnL         float64   // 本輪已實現盈虧（扣除手續費）
+	UnrealizedPnL       float64   // 觸發時的未實現盈虧
+	ExpectedProfit      float64   // 預期總盈利（實現+未實現）
+	TotalFees           float64   // 本輪總手續費
+	TriggerPrice        float64   // 觸發打平時的價格
+	AvgCost             float64   // 平均成本
 }
 
 // FundingRecord 自動注資記錄 ⭐
@@ -82,12 +82,12 @@ type FundingRecord struct {
 
 // RoundStats 當前輪次統計
 type RoundStats struct {
-	RoundID               int       // 當前輪次編號
-	StartTime             time.Time // 輪次開始時間
-	OpenCount             int       // 本輪開倉次數
-	NormalCloseCount      int       // 正常止盈關倉次數 ⭐
-	BreakEvenCloseCount   int       // 打平強制關倉次數 ⭐
-	TotalFeesInRound      float64   // 本輪累積手續費
+	RoundID             int       // 當前輪次編號
+	StartTime           time.Time // 輪次開始時間
+	OpenCount           int       // 本輪開倉次數
+	NormalCloseCount    int       // 正常止盈關倉次數 ⭐
+	BreakEvenCloseCount int       // 打平強制關倉次數 ⭐
+	TotalFeesInRound    float64   // 本輪累積手續費
 }
 
 // GetTotalCloseCount 獲取總關倉次數（正常 + 打平）
@@ -237,7 +237,7 @@ func (e *BacktestEngine) executeClose(
 	// 注意：同时追踪两种总利润
 	// - totalProfitGross: 基于平均成本（反映真实账户表现）
 	// - totalProfitGross_Entry: 基于单笔开仓价（反映策略触发表现）
-	*totalProfitGross += pnlAmount_Avg // 基于平均成本
+	*totalProfitGross += pnlAmount_Avg   // 基于平均成本
 	*totalProfitGross_Entry += pnlAmount // 基于单笔开仓价 ⭐
 	*totalFeesClose += closeFee
 
@@ -476,11 +476,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 						EndTime:             currentTime,
 						Duration:            currentTime.Sub(e.currentRoundStats.StartTime).String(),
 						TotalOpenCount:      e.currentRoundStats.OpenCount,
-						NormalCloseCount:    e.currentRoundStats.NormalCloseCount,      // 正常止盈關倉數 ⭐
+						NormalCloseCount:    e.currentRoundStats.NormalCloseCount,     // 正常止盈關倉數 ⭐
 						BreakEvenCloseCount: e.currentRoundStats.BreakEvenCloseCount,  // 打平強制關倉數 ⭐
 						TotalCloseCount:     e.currentRoundStats.GetTotalCloseCount(), // 總關倉數 ⭐
-						RealizedPnL:         beforeCloseRealizedPnL,                    // 打平前的已實現盈虧
-						UnrealizedPnL:       beforeCloseUnrealizedPnL,                  // 打平前的未實現盈虧
+						RealizedPnL:         beforeCloseRealizedPnL,                   // 打平前的已實現盈虧
+						UnrealizedPnL:       beforeCloseUnrealizedPnL,                 // 打平前的未實現盈虧
 						ExpectedProfit:      beforeCloseRealizedPnL + beforeCloseUnrealizedPnL,
 						TotalFees:           e.currentRoundStats.TotalFeesInRound,
 						TriggerPrice:        currentPrice.Value(),
@@ -657,12 +657,41 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		}
 	}
 
-	// ========== 步驟 4: 計算未實現盈虧（不強制平倉）==========
+	// ========== 步驟 4: 回測結束，強制平倉所有未平倉位 ⭐ ==========
 	lastCandle := candles[len(candles)-1]
 	lastPrice := lastCandle.Close().Value()
 	lastTime := lastCandle.Timestamp()
 
-	// 記錄最終資金快照（不包含未平倉）
+	// 強制平倉所有未平倉位（使用最後收盤價）
+	// finalAvgCost := e.positionTracker.CalculateAverageCost()
+	// finalPositionsToClose := make([]simulator.Position, len(e.positionTracker.GetOpenPositions()))
+	// copy(finalPositionsToClose, e.positionTracker.GetOpenPositions())
+
+	// for _, pos := range finalPositionsToClose {
+	// 	err := e.executeClose(
+	// 		pos,
+	// 		lastPrice, // 使用最後收盤價平倉
+	// 		lastTime,
+	// 		finalAvgCost,
+	// 		"backtest_end_force_close", // 回測結束強制平倉
+	// 		&balance,
+	// 		&totalProfitGross,
+	// 		&totalProfitGross_Entry,
+	// 		&totalFeesClose,
+	// 		&openPositionValue,
+	// 		&currentRoundRealizedPnL,
+	// 		&currentRoundClosedValue,
+	// 		&totalRealizedPnL,
+	// 		&tradeCounter,
+	// 	)
+	// 	if err != nil {
+	// 		continue
+	// 	}
+	// 	// 標記為強制平倉（不計入正常止盈）
+	// 	e.currentRoundStats.BreakEvenCloseCount++
+	// }
+
+	// 記錄最終資金快照
 	e.calculator.RecordBalance(lastTime, balance)
 
 	// ========== 步驟 5: 計算回測指標（包含未實現盈虧）==========

@@ -180,22 +180,32 @@ func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate 
 		return 0
 	}
 
-	// ⭐ 使用平均成本計算（基於币数的加权平均）
-	totalSize := pt.GetTotalSize() // 總倉位大小（USDT）
-	avgCost := pt.avgCost           // 累進平均成本
-
-	// ⭐ 使用 PnLCalculator 計算價格變化率 (Single Source of Truth)
-	// 參數名清楚表明：基於平均成本計算未實現盈虧
-	priceChangeRate := pt.pnlCalculator.CalculatePriceChangeRate(currentPrice, avgCost)
-
-	// ⭐ 計算未實現盈虧（扣費前）
+	// ========== 原本的算法（待驗證）==========
+	totalSize := pt.GetTotalSize() // 開倉時投入的 USDT 總和
+	avgCost := pt.avgCost
+	priceChangeRate := (currentPrice - avgCost) / avgCost
 	unrealizedPnL := totalSize * priceChangeRate
 
-	// ⭐ 計算預估平倉手續費
-	closeValue := totalSize + unrealizedPnL // 平倉時的總價值
-	closeFee := closeValue * feeRate        // 平倉手續費
+	// ========== DEBUG: 比較兩種算法 ==========
+	// TODO: 驗證完畢後移除這段 debug code
+	totalCoins := pt.totalCoins
+	unrealizedPnL_v2 := totalCoins * (currentPrice - avgCost)
 
-	// ⭐ 未實現盈虧 = 浮動盈虧 - 預估平倉費
+	// 如果兩種算法差異超過 0.01，印出 debug 資訊
+	if diff := unrealizedPnL - unrealizedPnL_v2; diff > 0.01 || diff < -0.01 {
+		fmt.Printf("[DEBUG UnrealizedPnL] currentPrice=%.2f, avgCost=%.2f\n", currentPrice, avgCost)
+		fmt.Printf("  totalSize=%.2f, totalCoins=%.6f\n", totalSize, totalCoins)
+		fmt.Printf("  priceChangeRate=%.6f\n", priceChangeRate)
+		fmt.Printf("  v1 (totalSize * rate)=%.4f\n", unrealizedPnL)
+		fmt.Printf("  v2 (coins * priceDiff)=%.4f\n", unrealizedPnL_v2)
+		fmt.Printf("  差異=%.4f\n", diff)
+	}
+
+	// 平倉手續費估算
+	closeValue := totalSize + unrealizedPnL // 平倉時能拿到的金額
+	closeFee := closeValue * feeRate
+
+	// 未實現盈虧 = 浮動盈虧 - 預估平倉費
 	return unrealizedPnL - closeFee
 }
 
@@ -208,13 +218,19 @@ func (pt *PositionTracker) CalculateTotalRealizedPnL() float64 {
 	return total
 }
 
-// GetTotalSize 獲取總倉位大小（美元）
+// GetTotalSize 獲取總倉位大小（開倉時的美元價值，固定值）
 func (pt *PositionTracker) GetTotalSize() float64 {
 	total := 0.0
 	for _, pos := range pt.openPositions {
 		total += pos.Size
 	}
 	return total
+}
+
+// GetPositionValueAtPrice 獲取當前市價下的持倉價值（美元）
+// ⭐ 用於計算最大回撤時的總權益
+func (pt *PositionTracker) GetPositionValueAtPrice(currentPrice float64) float64 {
+	return pt.totalCoins * currentPrice
 }
 
 // GetAverageHoldDuration 獲取平均持倉時長

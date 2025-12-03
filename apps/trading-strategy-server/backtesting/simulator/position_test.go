@@ -183,3 +183,113 @@ func TestPositionTracker_GetTotalRealizedPnL(t *testing.T) {
 
 	t.Logf("✅ Total realized PnL: %.2f USDT", totalPnL)
 }
+
+// ========== 多倉位場景測試（從 position_fix_test.go 合併）==========
+
+// TestPositionTracker_ClosePosition_MultiPosition 測試多倉位場景
+// 驗證平倉時使用開倉價而不是平均成本計算幣數
+func TestPositionTracker_ClosePosition_MultiPosition(t *testing.T) {
+	tracker := NewPositionTracker()
+
+	// 開倉1: 100 USDT @ 2500 → 應該買入 0.04 BTC
+	pos1 := tracker.AddPosition(2500, 100, time.Now(), 2600)
+	expectedCoins1 := 100.0 / 2500.0 // 0.04 BTC
+
+	if tracker.totalCoins != expectedCoins1 {
+		t.Errorf("開倉1後，totalCoins 應該是 %.6f，實際是 %.6f", expectedCoins1, tracker.totalCoins)
+	}
+
+	if tracker.avgCost != 2500 {
+		t.Errorf("開倉1後，avgCost 應該是 2500，實際是 %.2f", tracker.avgCost)
+	}
+
+	// 開倉2: 100 USDT @ 2600 → 應該買入 0.0385 BTC
+	tracker.AddPosition(2600, 100, time.Now(), 2700)
+	expectedCoins2 := 100.0 / 2600.0 // 0.0385 BTC
+	expectedTotalCoins := expectedCoins1 + expectedCoins2
+
+	if tracker.totalCoins < expectedTotalCoins-0.00001 || tracker.totalCoins > expectedTotalCoins+0.00001 {
+		t.Errorf("開倉2後，totalCoins 應該是 %.6f，實際是 %.6f", expectedTotalCoins, tracker.totalCoins)
+	}
+
+	// 平均成本應該是加權平均
+	// avgCost = (2500*0.04 + 2600*0.038462) / (0.04 + 0.038462)
+	//         = (100 + 100) / 0.078462
+	//         = 200 / 0.078462 ≈ 2549.02
+	expectedAvgCost := 200.0 / expectedTotalCoins
+
+	if tracker.avgCost < expectedAvgCost-1 || tracker.avgCost > expectedAvgCost+1 {
+		t.Errorf("開倉2後，avgCost 應該約為 %.2f，實際是 %.2f", expectedAvgCost, tracker.avgCost)
+	}
+
+	// ⭐ 關鍵測試：平倉1，在 2600 平掉第一筆開倉
+	// 應該平掉 0.04 BTC（第一筆實際買入的幣數）
+	// 而不是 100 / 2549 ≈ 0.0392 BTC（用平均成本計算的幣數）
+	err := tracker.ClosePosition(pos1.ID, 2600, time.Now(), 4.0)
+	if err != nil {
+		t.Fatalf("平倉失敗: %v", err)
+	}
+
+	// 平倉後，剩餘幣數應該是 0.0385 BTC（只剩第二筆）
+	expectedRemainingCoins := expectedCoins2
+
+	if tracker.totalCoins < expectedRemainingCoins-0.00001 || tracker.totalCoins > expectedRemainingCoins+0.00001 {
+		t.Errorf("平倉1後，剩餘 totalCoins 應該是 %.6f，實際是 %.6f", expectedRemainingCoins, tracker.totalCoins)
+	}
+
+	// ⭐ 平倉後，平均成本應該保持不變（關鍵特性）
+	// 平倉只減少幣數，不改變平均成本
+	if tracker.avgCost < expectedAvgCost-1 || tracker.avgCost > expectedAvgCost+1 {
+		t.Errorf("平倉1後，avgCost 應該保持約 %.2f，實際是 %.2f", expectedAvgCost, tracker.avgCost)
+	}
+
+	// 驗證盈虧計算
+	// 第一筆：100 USDT @ 2500 → 2600 平倉
+	// 收入 = 0.04 * 2600 = 104 USDT
+	// 成本 = 100 USDT
+	// 盈虧 = 4 USDT ✅
+	expectedPnL := 4.0
+	actualPnL := tracker.CalculateTotalRealizedPnL()
+
+	if actualPnL != expectedPnL {
+		t.Errorf("已實現盈虧應該是 %.2f USDT，實際是 %.2f USDT", expectedPnL, actualPnL)
+	}
+
+	t.Logf("✅ 多倉位場景驗證通過:")
+	t.Logf("   開倉1: 100 USDT @ 2500 → 0.04 BTC")
+	t.Logf("   開倉2: 100 USDT @ 2600 → %.6f BTC", expectedCoins2)
+	t.Logf("   總持倉: %.6f BTC，平均成本: %.2f", expectedTotalCoins, expectedAvgCost)
+	t.Logf("   平倉1: 0.04 BTC @ 2600，盈虧: %.2f USDT", expectedPnL)
+	t.Logf("   剩餘持倉: %.6f BTC，平均成本: %.2f", tracker.totalCoins, tracker.avgCost)
+}
+
+// TestPositionTracker_ClosePosition_CoinsCalculation 對比正確/錯誤的幣數計算
+func TestPositionTracker_ClosePosition_CoinsCalculation(t *testing.T) {
+	tracker := NewPositionTracker()
+	pos1 := tracker.AddPosition(2500, 100, time.Now(), 2600)
+	tracker.AddPosition(2600, 100, time.Now(), 2700)
+
+	// 第一筆開倉買入的實際幣數
+	correctCoins := 100.0 / 2500.0 // 0.04 BTC
+
+	// 錯誤計算（如果用平均成本）
+	avgCost := tracker.avgCost  // ≈ 2549
+	wrongCoins := 100.0 / avgCost // ≈ 0.0392 BTC
+
+	t.Logf("第一筆開倉實際買入: %.6f BTC @ 2500", correctCoins)
+	t.Logf("如果用平均成本計算: %.6f BTC @ %.2f (錯誤！)", wrongCoins, avgCost)
+	t.Logf("差異: %.6f BTC", correctCoins-wrongCoins)
+
+	// 驗證：平倉後 totalCoins 應該準確減少
+	totalBefore := tracker.totalCoins
+	tracker.ClosePosition(pos1.ID, 2600, time.Now(), 4.0)
+	totalAfter := tracker.totalCoins
+
+	actualReduction := totalBefore - totalAfter
+
+	if actualReduction < correctCoins-0.00001 || actualReduction > correctCoins+0.00001 {
+		t.Errorf("平倉應該減少 %.6f BTC，實際減少 %.6f BTC", correctCoins, actualReduction)
+	}
+
+	t.Logf("✅ 正確減少了 %.6f BTC", actualReduction)
+}
