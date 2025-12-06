@@ -38,6 +38,8 @@ Related to #2"
 | 002 | UnrealizedPnL 計算不一致 | 🔍 | - | - | 12-04 | - |
 | 003 | 兩版本結果差異巨大 | 🔴 | - | - | 12-04 | - |
 | 004 | 強制平倉被註解 | ⚠️ | - | - | 12-04 | - |
+| 005 | 計算邏輯分散，不符合 Single Source of Truth | 📋 | - | - | 12-07 | - |
+| 006 | 使用 float64 計算導致精度問題 | ✅ | - | - | 12-07 | 12-07 |
 
 > **備註**：Issue 連結待 GitHub repo 建立後補上
 
@@ -188,4 +190,91 @@ unrealizedPnL := totalCoins * (currentPrice - avgCost)
 
 ---
 
-*最後更新: 2025-12-04*
+---
+
+## BUG-005: 計算邏輯分散，不符合 Single Source of Truth
+
+**狀態**: 📋 待重構
+
+**現象**:
+- 同一個計算邏輯散落在多個文件
+- 勝率在 `position.go` 和 `metrics/calculator.go` 都有計算
+- 手續費汇總分散在 `order_simulator` 和 `metrics`
+- `MetricsCalculator` 做了太多計算，而不是只匯報
+
+**目前的計算分布**:
+```
+pnl_calculator.go          order_simulator.go
+├── 價格變化率              ├── 開倉手續費
+├── 盈虧金額                ├── 平倉手續費
+└── 盈虧百分比              ├── 實際成本
+                           └── 收入
+
+position.go                metrics/calculator.go
+├── 平均成本 ⭐             ├── 總手續費 (又加一次)
+├── 總幣數                  ├── 淨利潤 (又算一次)
+├── 未實現盈虧              ├── 總收益率
+├── 已實現盈虧汇總          ├── 最大回撤
+└── 勝率 ⭐                 ├── 勝率 ⭐ (重複！)
+                           └── 盈虧比
+```
+
+**理想架構**:
+```
+PnLCalculator (Single Source of Truth)
+    ↑ 所有盈虧計算
+    │
+PositionTracker (倉位狀態)
+    ├── 調用 PnLCalculator
+    ├── 提供：平均成本、總幣數、未實現盈虧、已實現盈虧
+    ├── 提供：勝率、盈虧比（唯一來源）
+    └── 提供：總手續費（唯一來源）
+    │
+MetricsCalculator (只做匯報)
+    └── 從 PositionTracker 取值，不自己計算
+```
+
+**解決方案**:
+- [ ] 把 `metrics/calculator.go` 的計算邏輯移到 `PositionTracker`
+- [ ] `MetricsCalculator` 只負責格式化和生成報告
+- [ ] 刪除重複的勝率計算
+
+**相關檔案**:
+- `backtesting/simulator/position.go`
+- `backtesting/simulator/pnl_calculator.go`
+- `backtesting/simulator/order_simulator.go`
+- `backtesting/metrics/calculator.go`
+
+**優先級**: 低（先完成 decimal 重構）
+
+---
+
+## ISSUE-006: 使用 float64 計算導致精度問題
+
+**狀態**: ✅ 已修復
+
+**現象**:
+- 金額計算使用 `float64`，會有浮點數精度問題
+- 例如：`0.1 + 0.2 = 0.30000000000000004`
+- 累積多次計算後誤差會放大
+
+**解決方案**:
+- [x] `position.go` 改用 `shopspring/decimal`
+- [x] `pnl_calculator.go` 改用 `shopspring/decimal`
+- [x] `order_simulator.go` 改用 `shopspring/decimal`
+- [x] `metrics/calculator.go` 改用 `shopspring/decimal`
+
+**原則**:
+- 計算過程用 `decimal.Decimal`
+- 儲存時用 `.InexactFloat64()` 轉回 `float64`
+- API 簽名保持 `float64` 不變
+
+**相關檔案**:
+- `backtesting/simulator/position.go` ✅
+- `backtesting/simulator/pnl_calculator.go` ✅
+- `backtesting/simulator/order_simulator.go` ✅
+- `backtesting/metrics/calculator.go` ✅
+
+---
+
+*最後更新: 2025-12-07*
