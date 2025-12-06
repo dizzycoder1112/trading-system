@@ -92,19 +92,23 @@ func (s *OrderSimulator) SimulateOpen(
 
 	openPrice := openPriceDecimal.InexactFloat64()
 	closePrice := closePriceDecimal.InexactFloat64()
-	positionSize := advice.PositionSize
+
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	positionSizeD := decimal.NewFromFloat(advice.PositionSize)
+	feeRateD := decimal.NewFromFloat(s.feeRate)
+	balanceD := decimal.NewFromFloat(balance)
 
 	// 3. 計算開倉手續費（倉位大小 * 手續費率）
-	fee := positionSize * s.feeRate
+	feeD := positionSizeD.Mul(feeRateD)
 
 	// 4. 計算實際成本（倉位大小 + 手續費）
-	actualCost := positionSize + fee
+	actualCostD := positionSizeD.Add(feeD)
 
 	// 5. 檢查餘額是否足夠
-	if balance < actualCost {
+	if balanceD.LessThan(actualCostD) {
 		return Position{}, 0, fmt.Errorf(
 			"insufficient balance: need %.2f USDT (position: %.2f + fee: %.2f), have %.2f USDT",
-			actualCost, positionSize, fee, balance,
+			actualCostD.InexactFloat64(), positionSizeD.InexactFloat64(), feeD.InexactFloat64(), balance,
 		)
 	}
 
@@ -112,12 +116,12 @@ func (s *OrderSimulator) SimulateOpen(
 	position := Position{
 		ID:               fmt.Sprintf("backtest_pos_%d", time.Now().UnixNano()),
 		EntryPrice:       openPrice,
-		Size:             positionSize,
+		Size:             advice.PositionSize,
 		OpenTime:         openTime,
 		TargetClosePrice: closePrice,
 	}
 
-	return position, actualCost, nil
+	return position, actualCostD.InexactFloat64(), nil
 }
 
 // SimulateClose 模擬平倉（統一計算所有盈虧指標）⭐
@@ -152,10 +156,16 @@ func (s *OrderSimulator) SimulateClose(
 		return CloseResult{}, errors.New("avgCost must be positive")
 	}
 
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	positionSizeD := decimal.NewFromFloat(position.Size)
+	entryPriceD := decimal.NewFromFloat(position.EntryPrice)
+	feeRateD := decimal.NewFromFloat(s.feeRate)
+
 	// ⭐ 2. 計算關閉的幣數（核心邏輯 - 必須用 EntryPrice）
 	// 重要：pos.Size 是該筆開倉投入的 USDT 金額
 	// 該筆開倉實際買入的幣數 = Size / EntryPrice
-	closedCoins := position.Size / position.EntryPrice
+	closedCoinsD := positionSizeD.Div(entryPriceD)
+	closedCoins := closedCoinsD.InexactFloat64()
 
 	// ⭐ 3. 使用 PnLCalculator 計算兩套盈虧 (Single Source of Truth)
 	//
@@ -173,23 +183,33 @@ func (s *OrderSimulator) SimulateClose(
 		closedCoins,
 	)
 
-	// ⭐ 5. 計算平倉時的實際價值和手續費
-	closeValue := position.Size + pnlAmount        // 平倉時的總價值（本金 + 盈虧）
-	closeFee := closeValue * s.feeRate             // 平倉手續費基於總價值
-	openFee := position.Size * s.feeRate           // 開倉手續費
-	realizedPnL := pnlAmount_Avg - openFee - closeFee // 已實現盈虧（基於平均成本）
+	// ⭐ 5. 計算平倉時的實際價值和手續費（使用 decimal）
+	pnlAmountD := decimal.NewFromFloat(pnlAmount)
+	pnlAmountAvgD := decimal.NewFromFloat(pnlAmount_Avg)
+
+	// closeValue = position.Size + pnlAmount（平倉時的總價值：本金 + 盈虧）
+	closeValueD := positionSizeD.Add(pnlAmountD)
+
+	// closeFee = closeValue * feeRate（平倉手續費基於總價值）
+	closeFeeD := closeValueD.Mul(feeRateD)
+
+	// openFee = position.Size * feeRate（開倉手續費）
+	openFeeD := positionSizeD.Mul(feeRateD)
+
+	// realizedPnL = pnlAmount_Avg - openFee - closeFee（已實現盈虧，基於平均成本）
+	realizedPnLD := pnlAmountAvgD.Sub(openFeeD).Sub(closeFeeD)
 
 	// ⭐ 6. 計算實際收入
 	// 實際收入 = 平倉價值 - 平倉手續費
 	// （開倉手續費已在開倉時扣除，這裡只扣平倉手續費）
-	revenue := closeValue - closeFee
+	revenueD := closeValueD.Sub(closeFeeD)
 
 	// 7. 創建已平倉記錄
 	closedPosition := ClosedPosition{
 		Position:     position,
 		ClosePrice:   closePrice,
 		CloseTime:    closeTime,
-		RealizedPnL:  realizedPnL, // 基於平均成本的盈虧（用於勝率計算）
+		RealizedPnL:  realizedPnLD.InexactFloat64(), // 基於平均成本的盈虧（用於勝率計算）
 		HoldDuration: closeTime.Sub(position.OpenTime),
 	}
 
@@ -200,8 +220,8 @@ func (s *OrderSimulator) SimulateClose(
 		PnLPercent:     pnlPercent,
 		PnL_Avg:        pnlAmount_Avg,
 		PnLPercent_Avg: pnlPercent_Avg,
-		CloseFee:       closeFee,
-		CloseValue:     closeValue,
-		Revenue:        revenue,
+		CloseFee:       closeFeeD.InexactFloat64(),
+		CloseValue:     closeValueD.InexactFloat64(),
+		Revenue:        revenueD.InexactFloat64(),
 	}, nil
 }

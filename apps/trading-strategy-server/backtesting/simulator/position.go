@@ -3,6 +3,8 @@ package simulator
 import (
 	"fmt"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 // Position 單筆持倉
@@ -52,20 +54,29 @@ func (pt *PositionTracker) AddPosition(
 	openTime time.Time,
 	targetClosePrice float64,
 ) Position {
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	entryPriceD := decimal.NewFromFloat(entryPrice)
+	sizeD := decimal.NewFromFloat(size)
+	avgCostD := decimal.NewFromFloat(pt.avgCost)
+	totalCoinsD := decimal.NewFromFloat(pt.totalCoins)
+
 	// ⭐ 計算新買入的幣數
-	newCoins := size / entryPrice
+	newCoinsD := sizeD.Div(entryPriceD)
 
 	// ⭐ 累進公式更新平均成本
 	// 新平均成本 = (原平均成本 × 原幣數 + 新價格 × 新幣數) / (原幣數 + 新幣數)
 	if pt.totalCoins > 0 {
-		pt.avgCost = (pt.avgCost*pt.totalCoins + entryPrice*newCoins) / (pt.totalCoins + newCoins)
+		// (avgCost * totalCoins + entryPrice * newCoins) / (totalCoins + newCoins)
+		numerator := avgCostD.Mul(totalCoinsD).Add(entryPriceD.Mul(newCoinsD))
+		denominator := totalCoinsD.Add(newCoinsD)
+		pt.avgCost = numerator.Div(denominator).InexactFloat64()
 	} else {
 		// 第一次開倉，平均成本就是開倉價
 		pt.avgCost = entryPrice
 	}
 
 	// ⭐ 更新總幣數
-	pt.totalCoins += newCoins
+	pt.totalCoins = totalCoinsD.Add(newCoinsD).InexactFloat64()
 
 	// 創建持倉記錄
 	position := Position{
@@ -105,18 +116,26 @@ func (pt *PositionTracker) ClosePosition(
 		return fmt.Errorf("position not found: %s", positionID)
 	}
 
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	sizeD := decimal.NewFromFloat(position.Size)
+	entryPriceD := decimal.NewFromFloat(position.EntryPrice)
+	totalCoinsD := decimal.NewFromFloat(pt.totalCoins)
+
 	// ⭐ 計算減少的幣數（用該倉位的開倉價計算）
 	// 重要：必須用 EntryPrice 而不是 avgCost，因為：
 	// - position.Size 是該筆開倉投入的 USDT 金額
 	// - 該筆開倉實際買入的幣數 = Size / EntryPrice
 	// - 平倉時應該平掉實際買入的幣數，而不是用平均成本計算的幣數
-	closedCoins := position.Size / position.EntryPrice
+	closedCoinsD := sizeD.Div(entryPriceD)
 
 	// ⭐ 只減少總幣數，平均成本不變
-	pt.totalCoins -= closedCoins
+	newTotalCoinsD := totalCoinsD.Sub(closedCoinsD)
+	pt.totalCoins = newTotalCoinsD.InexactFloat64()
 
 	// ⭐ 如果所有倉位都關閉了，重置平均成本
-	if pt.totalCoins <= 0.00001 { // 使用小值避免浮點誤差
+	// 使用 decimal 比較避免浮點誤差
+	threshold := decimal.NewFromFloat(0.00001)
+	if newTotalCoinsD.LessThanOrEqual(threshold) {
 		pt.avgCost = 0
 		pt.totalCoins = 0
 	}
@@ -180,57 +199,53 @@ func (pt *PositionTracker) CalculateUnrealizedPnL(currentPrice float64, feeRate 
 		return 0
 	}
 
-	// ========== 原本的算法（待驗證）==========
-	totalSize := pt.GetTotalSize() // 開倉時投入的 USDT 總和
-	avgCost := pt.avgCost
-	priceChangeRate := (currentPrice - avgCost) / avgCost
-	unrealizedPnL := totalSize * priceChangeRate
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	currentPriceD := decimal.NewFromFloat(currentPrice)
+	avgCostD := decimal.NewFromFloat(pt.avgCost)
+	totalCoinsD := decimal.NewFromFloat(pt.totalCoins)
+	feeRateD := decimal.NewFromFloat(feeRate)
 
-	// ========== DEBUG: 比較兩種算法 ==========
-	// TODO: 驗證完畢後移除這段 debug code
-	totalCoins := pt.totalCoins
-	unrealizedPnL_v2 := totalCoins * (currentPrice - avgCost)
-
-	// 如果兩種算法差異超過 0.01，印出 debug 資訊
-	if diff := unrealizedPnL - unrealizedPnL_v2; diff > 0.01 || diff < -0.01 {
-		fmt.Printf("[DEBUG UnrealizedPnL] currentPrice=%.2f, avgCost=%.2f\n", currentPrice, avgCost)
-		fmt.Printf("  totalSize=%.2f, totalCoins=%.6f\n", totalSize, totalCoins)
-		fmt.Printf("  priceChangeRate=%.6f\n", priceChangeRate)
-		fmt.Printf("  v1 (totalSize * rate)=%.4f\n", unrealizedPnL)
-		fmt.Printf("  v2 (coins * priceDiff)=%.4f\n", unrealizedPnL_v2)
-		fmt.Printf("  差異=%.4f\n", diff)
-	}
+	// ⭐ 未實現盈虧 = totalCoins * (currentPrice - avgCost)
+	unrealizedPnLD := totalCoinsD.Mul(currentPriceD.Sub(avgCostD))
 
 	// 平倉手續費估算
-	closeValue := totalSize + unrealizedPnL // 平倉時能拿到的金額
-	closeFee := closeValue * feeRate
+	// closeValue = totalCoins * currentPrice
+	closeValueD := totalCoinsD.Mul(currentPriceD)
+	closeFeeD := closeValueD.Mul(feeRateD)
 
 	// 未實現盈虧 = 浮動盈虧 - 預估平倉費
-	return unrealizedPnL - closeFee
+	resultD := unrealizedPnLD.Sub(closeFeeD)
+
+	return resultD.InexactFloat64()
 }
 
 // CalculateTotalRealizedPnL 計算總已實現盈虧
 func (pt *PositionTracker) CalculateTotalRealizedPnL() float64 {
-	total := 0.0
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	totalD := decimal.Zero
 	for _, closed := range pt.closedPositions {
-		total += closed.RealizedPnL
+		totalD = totalD.Add(decimal.NewFromFloat(closed.RealizedPnL))
 	}
-	return total
+	return totalD.InexactFloat64()
 }
 
 // GetTotalSize 獲取總倉位大小（開倉時的美元價值，固定值）
 func (pt *PositionTracker) GetTotalSize() float64 {
-	total := 0.0
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	totalD := decimal.Zero
 	for _, pos := range pt.openPositions {
-		total += pos.Size
+		totalD = totalD.Add(decimal.NewFromFloat(pos.Size))
 	}
-	return total
+	return totalD.InexactFloat64()
 }
 
 // GetPositionValueAtPrice 獲取當前市價下的持倉價值（美元）
 // ⭐ 用於計算最大回撤時的總權益
 func (pt *PositionTracker) GetPositionValueAtPrice(currentPrice float64) float64 {
-	return pt.totalCoins * currentPrice
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	totalCoinsD := decimal.NewFromFloat(pt.totalCoins)
+	currentPriceD := decimal.NewFromFloat(currentPrice)
+	return totalCoinsD.Mul(currentPriceD).InexactFloat64()
 }
 
 // GetAverageHoldDuration 獲取平均持倉時長
@@ -260,5 +275,8 @@ func (pt *PositionTracker) GetWinRate() float64 {
 		}
 	}
 
-	return float64(winCount) / float64(len(pt.closedPositions))
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	winCountD := decimal.NewFromInt(int64(winCount))
+	totalCountD := decimal.NewFromInt(int64(len(pt.closedPositions)))
+	return winCountD.Div(totalCountD).InexactFloat64()
 }

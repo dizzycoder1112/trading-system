@@ -11,6 +11,7 @@ import (
 	"dizzycode.xyz/trading-strategy-server/backtesting/metrics"
 	"dizzycode.xyz/trading-strategy-server/backtesting/simulator"
 	"dizzycode.xyz/trading-strategy-server/internal/domain/strategy/strategies/grid"
+	"github.com/shopspring/decimal"
 )
 
 // BacktestConfig 回測配置
@@ -120,6 +121,23 @@ type TradeLog struct {
 
 // ⭐ 已刪除：calculateUnrealizedPnL - 統一使用 PositionTracker.CalculateUnrealizedPnL()
 
+// ExecuteCloseResult 平倉執行結果（用於 decimal 累加）⭐
+type ExecuteCloseResult struct {
+	Revenue           decimal.Decimal // 實際收入（返回餘額）
+	ProfitGross       decimal.Decimal // 基於平均成本的盈虧
+	ProfitGross_Entry decimal.Decimal // 基於單筆開倉價的盈虧
+	CloseFee          decimal.Decimal // 平倉手續費
+	RealizedPnL       decimal.Decimal // 已實現盈虧（基於平均成本，扣除手續費）
+	ClosedValue       decimal.Decimal // 平倉總價值
+	PositionSize      decimal.Decimal // 倉位大小（用於更新 openPositionValue）
+	// 用於交易日誌的 float64 值
+	PnLPercent     float64 // 基於開倉價的盈虧百分比
+	PnL            float64 // 基於開倉價的盈虧金額
+	PnLPercent_Avg float64 // 基於平均成本的盈虧百分比
+	PnL_Avg        float64 // 基於平均成本的盈虧金額
+	ClosePrice     float64 // 平倉價格
+}
+
 // NewBacktestEngine 創建回測引擎
 func NewBacktestEngine(config BacktestConfig) (*BacktestEngine, error) {
 	// 1. 創建真實的 Grid 策略 ⭐ 直接寫死參數（POC）
@@ -167,59 +185,35 @@ func NewBacktestEngine(config BacktestConfig) (*BacktestEngine, error) {
 	}, nil
 }
 
-// executeClose 执行平仓操作并更新统计数据（提取共用逻辑）⭐
+// executeClose 执行平仓操作（返回需要累加的結果）⭐ 重構版
 //
 // 这个辅助函数封装了平仓的核心流程：
 //  1. 调用 OrderSimulator.SimulateClose() 计算平仓结果
 //  2. 更新 PositionTracker 状态
-//  3. 更新余额
-//  4. 累加统计数据（totalProfitGross, totalFeesClose）
-//  5. 更新当前轮次数据
-//  6. 记录资金快照
-//  7. 记录交易日志
+//  3. 返回需要累加的数据（由调用方用 decimal 累加）
 //
 // 参数：
 //   - pos: 要平仓的仓位
 //   - closePrice: 平仓价格
 //   - closeTime: 平仓时间
 //   - avgCost: 平均成本
-//   - reason: 平仓原因（用于日志）
-//   - 其他参数: 需要更新的统计变量（通过指针传递）
 //
 // 返回：
+//   - ExecuteCloseResult: 平仓結果（用於 decimal 累加）
 //   - error: 如果平仓失败则返回错误
 func (e *BacktestEngine) executeClose(
 	pos simulator.Position,
 	closePrice float64,
 	closeTime time.Time,
 	avgCost float64,
-	reason string,
-	balance *float64,
-	totalProfitGross *float64,
-	totalProfitGross_Entry *float64, // ⭐ 新增：基于单笔开仓价的总利润
-	totalFeesClose *float64,
-	openPositionValue *float64,
-	currentRoundRealizedPnL *float64,
-	currentRoundClosedValue *float64,
-	totalRealizedPnL *float64,
-	tradeCounter *int,
-) error {
+) (ExecuteCloseResult, error) {
 	// 1. 模拟平仓（统一计算所有盈亏指标）
 	closeResult, err := e.simulator.SimulateClose(pos, closePrice, closeTime, avgCost)
 	if err != nil {
-		return err
+		return ExecuteCloseResult{}, err
 	}
 
-	// 2. 提取返回值
-	pnlAmount := closeResult.PnL                 // 基于开仓价的盈亏
-	pnlPercent := closeResult.PnLPercent         // 基于开仓价的盈亏百分比
-	pnlAmount_Avg := closeResult.PnL_Avg         // 基于平均成本的盈亏
-	pnlPercent_Avg := closeResult.PnLPercent_Avg // 基于平均成本的盈亏百分比
-	closeValue := closeResult.CloseValue         // 平仓总价值
-	closeFee := closeResult.CloseFee             // 平仓手续费
-	revenue := closeResult.Revenue               // 实际收入
-
-	// 3. 更新仓位追踪器
+	// 2. 更新仓位追踪器
 	err = e.positionTracker.ClosePosition(
 		pos.ID,
 		closeResult.ClosedPosition.ClosePrice,
@@ -227,54 +221,25 @@ func (e *BacktestEngine) executeClose(
 		closeResult.ClosedPosition.RealizedPnL, // 基于平均成本的已实现盈亏
 	)
 	if err != nil {
-		return err
+		return ExecuteCloseResult{}, err
 	}
 
-	// 4. 更新余额
-	*balance += revenue
-
-	// 5. 累加统计数据
-	// 注意：同时追踪两种总利润
-	// - totalProfitGross: 基于平均成本（反映真实账户表现）
-	// - totalProfitGross_Entry: 基于单笔开仓价（反映策略触发表现）
-	*totalProfitGross += pnlAmount_Avg   // 基于平均成本
-	*totalProfitGross_Entry += pnlAmount // 基于单笔开仓价 ⭐
-	*totalFeesClose += closeFee
-
-	// 6. 更新当前交易轮次数据
-	*openPositionValue -= pos.Size
-	*currentRoundRealizedPnL += closeResult.ClosedPosition.RealizedPnL
-	*currentRoundClosedValue += closeValue
-	*totalRealizedPnL += closeResult.ClosedPosition.RealizedPnL
-
-	// 7. 记录资金快照
-	e.calculator.RecordBalance(closeTime, *balance)
-
-	// 8. 记录交易日志
-	*tradeCounter++
-	e.tradeLog = append(e.tradeLog, TradeLog{
-		TradeID:                 *tradeCounter,
-		Time:                    closeTime,
-		Action:                  "CLOSE",
-		Price:                   closeResult.ClosedPosition.ClosePrice,
-		PositionSize:            closeValue,
-		Balance:                 *balance,
-		OpenPositionValue:       *openPositionValue,
-		PnLPercent:              pnlPercent,
-		PnL:                     pnlAmount,
-		AvgCost:                 avgCost,
-		PnLPercent_Avg:          pnlPercent_Avg,
-		PnL_Avg:                 pnlAmount_Avg,
-		Fee:                     closeFee,
-		RoundClosedValue:        *currentRoundClosedValue,
-		CurrentRoundRealizedPnL: *currentRoundRealizedPnL,
-		TotalRealizedPnL:        *totalRealizedPnL,
-		UnrealizedPnL:           e.positionTracker.CalculateUnrealizedPnL(closePrice, e.config.FeeRate),
-		Reason:                  reason,
-		PositionID:              pos.ID,
-	})
-
-	return nil
+	// 3. 構建返回結果（使用 decimal 類型）
+	return ExecuteCloseResult{
+		Revenue:           decimal.NewFromFloat(closeResult.Revenue),
+		ProfitGross:       decimal.NewFromFloat(closeResult.PnL_Avg), // 基於平均成本
+		ProfitGross_Entry: decimal.NewFromFloat(closeResult.PnL),     // 基於開倉價
+		CloseFee:          decimal.NewFromFloat(closeResult.CloseFee),
+		RealizedPnL:       decimal.NewFromFloat(closeResult.ClosedPosition.RealizedPnL),
+		ClosedValue:       decimal.NewFromFloat(closeResult.CloseValue),
+		PositionSize:      decimal.NewFromFloat(pos.Size),
+		// 用於交易日誌的 float64 值
+		PnLPercent:     closeResult.PnLPercent,
+		PnL:            closeResult.PnL,
+		PnLPercent_Avg: closeResult.PnLPercent_Avg,
+		PnL_Avg:        closeResult.PnL_Avg,
+		ClosePrice:     closeResult.ClosedPosition.ClosePrice,
+	}, nil
 }
 
 // Run 執行回測
@@ -299,28 +264,29 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		return metrics.BacktestResult{}, fmt.Errorf("no candles provided")
 	}
 
-	balance := e.config.InitialBalance
+	// ⭐ 使用 decimal 計算，避免浮點誤差
+	balanceD := decimal.NewFromFloat(e.config.InitialBalance)
 	tradeCounter := 0 // 交易計數器
 
-	// ⭐ 追蹤統計數據
-	totalOpenedTrades := 0        // 總開倉數量
-	totalProfitGross := 0.0       // 總利潤（基於平均成本，未扣手續費）
-	totalProfitGross_Entry := 0.0 // 總利潤（基於單筆開倉價，未扣手續費）⭐ 新增
-	totalFeesOpen := 0.0          // 開倉總手續費
-	totalFeesClose := 0.0         // 關倉總手續費
+	// ⭐ 追蹤統計數據（使用 decimal）
+	totalOpenedTrades := 0                      // 總開倉數量
+	totalProfitGrossD := decimal.Zero           // 總利潤（基於平均成本，未扣手續費）
+	totalProfitGross_EntryD := decimal.Zero     // 總利潤（基於單筆開倉價，未扣手續費）⭐ 新增
+	totalFeesOpenD := decimal.Zero              // 開倉總手續費
+	totalFeesCloseD := decimal.Zero             // 關倉總手續費
 
 	// ⭐ 追蹤當前交易輪次數據（用於打平機制）
-	openPositionValue := 0.0       // 累計持倉總價值（USDT）
-	currentRoundRealizedPnL := 0.0 // 當前輪次已實現盈虧（扣除手續費）
-	currentRoundClosedValue := 0.0 // 當前輪次累積關倉價值（本金 + 盈虧）⭐
-	totalRealizedPnL := 0.0        // 累計已實現盈虧（從回測開始的所有已實現盈虧總和）⭐
+	openPositionValueD := decimal.Zero       // 累計持倉總價值（USDT）
+	currentRoundRealizedPnLD := decimal.Zero // 當前輪次已實現盈虧（扣除手續費）
+	currentRoundClosedValueD := decimal.Zero // 當前輪次累積關倉價值（本金 + 盈虧）⭐
+	totalRealizedPnLD := decimal.Zero        // 累計已實現盈虧（從回測開始的所有已實現盈虧總和）⭐
 
 	// ⭐ 追蹤持倉全滿天數（定義：可用餘額 < 單次開倉成本）
 	fullPositionDays := make(map[string]bool) // 記錄哪些天達到持倉全滿（key: YYYY-MM-DD）
-	maxOpenPositionValue := 0.0               // 追蹤最大持倉價值（USDT）⭐
+	maxOpenPositionValueD := decimal.Zero     // 追蹤最大持倉價值（USDT）⭐
 
 	// 記錄初始資金
-	e.calculator.RecordBalance(candles[0].Timestamp(), balance)
+	e.calculator.RecordBalance(candles[0].Timestamp(), balanceD.InexactFloat64())
 
 	// 遍歷所有K線
 	for i := 0; i < len(candles); i++ {
@@ -341,37 +307,64 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			// ⭐ 檢查是否觸及目標平倉價格（使用 High 價格）
 			if currentCandle.High().Value() >= pos.TargetClosePrice {
 				// ⭐ 使用提取的辅助函数执行平仓（使用止盈價）
-				err := e.executeClose(
+				closeResult, err := e.executeClose(
 					pos,
 					pos.TargetClosePrice, // ⭐ 修正：使用止盈價而不是收盤價
 					currentTime,
 					avgCostAtThisTime,
-					fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice),
-					&balance,
-					&totalProfitGross,
-					&totalProfitGross_Entry, // ⭐ 新增
-					&totalFeesClose,
-					&openPositionValue,
-					&currentRoundRealizedPnL,
-					&currentRoundClosedValue,
-					&totalRealizedPnL,
-					&tradeCounter,
 				)
 				if err != nil {
 					// 平倉失敗，記錄錯誤但繼續
 					continue
 				}
 
+				// ⭐ 使用 decimal 累加（避免浮點精度問題）
+				balanceD = balanceD.Add(closeResult.Revenue)
+				totalProfitGrossD = totalProfitGrossD.Add(closeResult.ProfitGross)
+				totalProfitGross_EntryD = totalProfitGross_EntryD.Add(closeResult.ProfitGross_Entry)
+				totalFeesCloseD = totalFeesCloseD.Add(closeResult.CloseFee)
+				openPositionValueD = openPositionValueD.Sub(closeResult.PositionSize)
+				currentRoundRealizedPnLD = currentRoundRealizedPnLD.Add(closeResult.RealizedPnL)
+				currentRoundClosedValueD = currentRoundClosedValueD.Add(closeResult.ClosedValue)
+				totalRealizedPnLD = totalRealizedPnLD.Add(closeResult.RealizedPnL)
+
+				// 記錄資金快照
+				e.calculator.RecordBalance(currentTime, balanceD.InexactFloat64())
+
+				// 記錄交易日誌
+				tradeCounter++
+				reason := fmt.Sprintf("hit_target_%.2f", pos.TargetClosePrice)
+				e.tradeLog = append(e.tradeLog, TradeLog{
+					TradeID:                 tradeCounter,
+					Time:                    currentTime,
+					Action:                  "CLOSE",
+					Price:                   closeResult.ClosePrice,
+					PositionSize:            closeResult.ClosedValue.InexactFloat64(),
+					Balance:                 balanceD.InexactFloat64(),
+					OpenPositionValue:       openPositionValueD.InexactFloat64(),
+					PnLPercent:              closeResult.PnLPercent,
+					PnL:                     closeResult.PnL,
+					AvgCost:                 avgCostAtThisTime,
+					PnLPercent_Avg:          closeResult.PnLPercent_Avg,
+					PnL_Avg:                 closeResult.PnL_Avg,
+					Fee:                     closeResult.CloseFee.InexactFloat64(),
+					RoundClosedValue:        currentRoundClosedValueD.InexactFloat64(),
+					CurrentRoundRealizedPnL: currentRoundRealizedPnLD.InexactFloat64(),
+					TotalRealizedPnL:        totalRealizedPnLD.InexactFloat64(),
+					UnrealizedPnL:           e.positionTracker.CalculateUnrealizedPnL(pos.TargetClosePrice, e.config.FeeRate),
+					Reason:                  reason,
+					PositionID:              pos.ID,
+				})
+
 				// ⭐ 更新正常關倉計數
 				e.currentRoundStats.NormalCloseCount++
-				closeFee := (pos.Size + (pos.TargetClosePrice-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
-				e.currentRoundStats.TotalFeesInRound += closeFee
+				e.currentRoundStats.TotalFeesInRound += closeResult.CloseFee.InexactFloat64()
 
 				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）
-				if openPositionValue <= 0.01 { // 使用小值避免浮點誤差
-					openPositionValue = 0
-					currentRoundRealizedPnL = 0 // 重置，開始新的交易輪次
-					currentRoundClosedValue = 0 // 重置關倉價值⭐
+				if openPositionValueD.LessThanOrEqual(decimal.NewFromFloat(0.01)) {
+					openPositionValueD = decimal.Zero
+					currentRoundRealizedPnLD = decimal.Zero // 重置，開始新的交易輪次
+					currentRoundClosedValueD = decimal.Zero // 重置關倉價值⭐
 				}
 			}
 		}
@@ -413,9 +406,9 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			totalSize,
 			avgCost,
 			totalFeesPaid,
-			currentRoundRealizedPnL, // ⭐ 傳入當前輪次已實現盈虧
-			currentRoundClosedValue, // ⭐ 傳入當前輪次累積關倉價值
-			unrealizedPnL,           // ⭐ 傳入外部計算的未實現盈虧
+			currentRoundRealizedPnLD.InexactFloat64(), // ⭐ 傳入當前輪次已實現盈虧
+			currentRoundClosedValueD.InexactFloat64(), // ⭐ 傳入當前輪次累積關倉價值
+			unrealizedPnL,                             // ⭐ 傳入外部計算的未實現盈虧
 		)
 
 		// 獲取開倉建議（grid.OpenAdvice）⭐ 傳入倉位摘要和當前K線
@@ -431,39 +424,65 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			copy(positionsToClose, e.positionTracker.GetOpenPositions())
 
 			// ⭐ 記錄本輪打平前的狀態
-			beforeCloseRealizedPnL := currentRoundRealizedPnL
+			beforeCloseRealizedPnL := currentRoundRealizedPnLD.InexactFloat64()
 			beforeCloseUnrealizedPnL := unrealizedPnL
 
 			for _, pos := range positionsToClose {
 				// ⭐ 使用提取的辅助函数执行平仓
-				err := e.executeClose(
+				closeResult, err := e.executeClose(
 					pos,
 					currentPrice.Value(),
 					currentTime,
 					avgCostAtThisTime,
-					gridAdvice.Reason, // 使用打平退出原因
-					&balance,
-					&totalProfitGross,
-					&totalProfitGross_Entry, // ⭐ 新增
-					&totalFeesClose,
-					&openPositionValue,
-					&currentRoundRealizedPnL,
-					&currentRoundClosedValue,
-					&totalRealizedPnL,
-					&tradeCounter,
 				)
 				if err != nil {
 					continue
 				}
 
+				// ⭐ 使用 decimal 累加（避免浮點精度問題）
+				balanceD = balanceD.Add(closeResult.Revenue)
+				totalProfitGrossD = totalProfitGrossD.Add(closeResult.ProfitGross)
+				totalProfitGross_EntryD = totalProfitGross_EntryD.Add(closeResult.ProfitGross_Entry)
+				totalFeesCloseD = totalFeesCloseD.Add(closeResult.CloseFee)
+				openPositionValueD = openPositionValueD.Sub(closeResult.PositionSize)
+				currentRoundRealizedPnLD = currentRoundRealizedPnLD.Add(closeResult.RealizedPnL)
+				currentRoundClosedValueD = currentRoundClosedValueD.Add(closeResult.ClosedValue)
+				totalRealizedPnLD = totalRealizedPnLD.Add(closeResult.RealizedPnL)
+
+				// 記錄資金快照
+				e.calculator.RecordBalance(currentTime, balanceD.InexactFloat64())
+
+				// 記錄交易日誌
+				tradeCounter++
+				e.tradeLog = append(e.tradeLog, TradeLog{
+					TradeID:                 tradeCounter,
+					Time:                    currentTime,
+					Action:                  "CLOSE",
+					Price:                   closeResult.ClosePrice,
+					PositionSize:            closeResult.ClosedValue.InexactFloat64(),
+					Balance:                 balanceD.InexactFloat64(),
+					OpenPositionValue:       openPositionValueD.InexactFloat64(),
+					PnLPercent:              closeResult.PnLPercent,
+					PnL:                     closeResult.PnL,
+					AvgCost:                 avgCostAtThisTime,
+					PnLPercent_Avg:          closeResult.PnLPercent_Avg,
+					PnL_Avg:                 closeResult.PnL_Avg,
+					Fee:                     closeResult.CloseFee.InexactFloat64(),
+					RoundClosedValue:        currentRoundClosedValueD.InexactFloat64(),
+					CurrentRoundRealizedPnL: currentRoundRealizedPnLD.InexactFloat64(),
+					TotalRealizedPnL:        totalRealizedPnLD.InexactFloat64(),
+					UnrealizedPnL:           e.positionTracker.CalculateUnrealizedPnL(currentPrice.Value(), e.config.FeeRate),
+					Reason:                  gridAdvice.Reason,
+					PositionID:              pos.ID,
+				})
+
 				// ⭐ 打平机制特有：更新当前轮次统计
 				e.currentRoundStats.BreakEvenCloseCount++
-				closeFee := (pos.Size + (currentPrice.Value()-pos.EntryPrice)*(pos.Size/pos.EntryPrice)) * e.config.FeeRate
-				e.currentRoundStats.TotalFeesInRound += closeFee
+				e.currentRoundStats.TotalFeesInRound += closeResult.CloseFee.InexactFloat64()
 
 				// ⭐ 檢查是否所有倉位被關閉（交易輪次結束）
-				if openPositionValue <= 0.01 { // 使用小值避免浮點誤差
-					openPositionValue = 0
+				if openPositionValueD.LessThanOrEqual(decimal.NewFromFloat(0.01)) {
+					openPositionValueD = decimal.Zero
 
 					// ⭐ 記錄打平輪次（在重置前）
 					if e.currentRoundStats.StartTime.IsZero() {
@@ -490,8 +509,8 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 
 					// ⭐ 打平退出時回收注資（如果有待回收的注資）
 					if e.pendingFunding > 0 {
-						recoveryAmount := e.pendingFunding
-						balance -= recoveryAmount // 扣除注資金額（相當於取回）
+						recoveryAmountD := decimal.NewFromFloat(e.pendingFunding)
+						balanceD = balanceD.Sub(recoveryAmountD) // 扣除注資金額（相當於取回）
 
 						// 更新注資記錄狀態
 						for i := len(e.fundingHistory) - 1; i >= 0; i-- {
@@ -505,12 +524,12 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 						e.pendingFunding = 0
 
 						// 記錄資金快照（重要：讓計算器知道資金減少了）
-						e.calculator.RecordBalance(currentTime, balance)
+						e.calculator.RecordBalance(currentTime, balanceD.InexactFloat64())
 					}
 
 					// 重置輪次數據
-					currentRoundRealizedPnL = 0 // 重置，開始新的交易輪次
-					currentRoundClosedValue = 0 // 重置關倉價值⭐
+					currentRoundRealizedPnLD = decimal.Zero // 重置，開始新的交易輪次
+					currentRoundClosedValueD = decimal.Zero // 重置關倉價值⭐
 					e.currentRoundStats = RoundStats{
 						RoundID:   e.currentRoundStats.RoundID + 1,
 						StartTime: time.Time{}, // 重置，下次開倉時會設置
@@ -522,9 +541,9 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		// ========== 步驟 3: 如果建議開倉，模擬開倉 ==========
 		if gridAdvice.ShouldOpen {
 			// 檢查餘額是否充足
-			estimatedCost := gridAdvice.PositionSize * (1 + e.config.FeeRate) // 倉位大小 + 手續費
+			estimatedCostD := decimal.NewFromFloat(gridAdvice.PositionSize).Mul(decimal.NewFromFloat(1 + e.config.FeeRate))
 
-			if balance >= estimatedCost {
+			if balanceD.GreaterThanOrEqual(estimatedCostD) {
 				// 轉換為 simulator.OpenAdvice
 				advice := simulator.OpenAdvice{
 					ShouldOpen:   gridAdvice.ShouldOpen,
@@ -537,14 +556,14 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				}
 
 				// 模擬開倉
-				position, cost, err := e.simulator.SimulateOpen(advice, balance, currentTime)
+				position, cost, err := e.simulator.SimulateOpen(advice, balanceD.InexactFloat64(), currentTime)
 				if err != nil {
 					// 開倉失敗，跳過
 					continue
 				}
 
-				// 計算開倉手續費
-				openFee := position.Size * e.config.FeeRate
+				// 計算開倉手續費（使用 decimal）
+				openFeeD := decimal.NewFromFloat(position.Size).Mul(decimal.NewFromFloat(e.config.FeeRate))
 
 				// 更新倉位追蹤器
 				newPosition := e.positionTracker.AddPosition(
@@ -554,28 +573,30 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					position.TargetClosePrice,
 				)
 
-				// 更新餘額
-				balance -= cost
+				// 更新餘額（使用 decimal）
+				costD := decimal.NewFromFloat(cost)
+				balanceD = balanceD.Sub(costD)
 
-				// ⭐ 累加統計數據
-				totalOpenedTrades++      // 累加開倉數量
-				totalFeesOpen += openFee // 累加開倉手續費
+				// ⭐ 累加統計數據（使用 decimal）
+				totalOpenedTrades++                    // 累加開倉數量
+				totalFeesOpenD = totalFeesOpenD.Add(openFeeD) // 累加開倉手續費
 
-				// ⭐ 更新當前交易輪次數據
-				openPositionValue += position.Size // 增加累計持倉價值
+				// ⭐ 更新當前交易輪次數據（使用 decimal）
+				positionSizeD := decimal.NewFromFloat(position.Size)
+				openPositionValueD = openPositionValueD.Add(positionSizeD) // 增加累計持倉價值
 
 				// ⭐ 更新當前輪次統計
 				if e.currentRoundStats.StartTime.IsZero() {
 					e.currentRoundStats.StartTime = currentTime // 首次開倉，設置開始時間
 				}
 				e.currentRoundStats.OpenCount++
-				e.currentRoundStats.TotalFeesInRound += openFee
+				e.currentRoundStats.TotalFeesInRound += openFeeD.InexactFloat64()
 
 				// ⭐ 重置閒置計數器（成功開倉後）
 				e.idleCandles = 0
 
 				// 記錄資金快照
-				e.calculator.RecordBalance(currentTime, balance)
+				e.calculator.RecordBalance(currentTime, balanceD.InexactFloat64())
 
 				// ⭐ 計算開倉後的平均成本
 				avgCostAfterOpen := e.positionTracker.CalculateAverageCost()
@@ -588,14 +609,14 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					Action:                  "OPEN",
 					Price:                   position.EntryPrice,
 					PositionSize:            position.Size,
-					Balance:                 balance,
-					OpenPositionValue:       openPositionValue, // ⭐ 開倉後的累計持倉價值
-					AvgCost:                 avgCostAfterOpen,  // ⭐ 開倉後的平均成本
+					Balance:                 balanceD.InexactFloat64(),
+					OpenPositionValue:       openPositionValueD.InexactFloat64(), // ⭐ 開倉後的累計持倉價值
+					AvgCost:                 avgCostAfterOpen,                    // ⭐ 開倉後的平均成本
 					PnL:                     0,
-					Fee:                     openFee,                                                                          // ⭐ 記錄開倉手續費
-					RoundClosedValue:        currentRoundClosedValue,                                                          // ⭐ 本輪累積關倉總價值
-					CurrentRoundRealizedPnL: currentRoundRealizedPnL,                                                          // ⭐ 本輪已實現盈虧
-					TotalRealizedPnL:        totalRealizedPnL,                                                                 // ⭐ 累計已實現盈虧
+					Fee:                     openFeeD.InexactFloat64(),                                                        // ⭐ 記錄開倉手續費
+					RoundClosedValue:        currentRoundClosedValueD.InexactFloat64(),                                        // ⭐ 本輪累積關倉總價值
+					CurrentRoundRealizedPnL: currentRoundRealizedPnLD.InexactFloat64(),                                        // ⭐ 本輪已實現盈虧
+					TotalRealizedPnL:        totalRealizedPnLD.InexactFloat64(),                                               // ⭐ 累計已實現盈虧
 					UnrealizedPnL:           e.positionTracker.CalculateUnrealizedPnL(currentPrice.Value(), e.config.FeeRate), // ⭐ 統一使用 PositionTracker
 					Reason:                  gridAdvice.Reason,
 					PositionID:              newPosition.ID, // ⭐ 記錄倉位ID
@@ -604,11 +625,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 		}
 
 		// ⭐ 檢查當前是否為持倉全滿狀態（每根 K 線結束時檢查）
-		if openPositionValue > maxOpenPositionValue {
-			maxOpenPositionValue = openPositionValue // 更新最大持倉價值 ⭐
+		if openPositionValueD.GreaterThan(maxOpenPositionValueD) {
+			maxOpenPositionValueD = openPositionValueD // 更新最大持倉價值 ⭐
 		}
 
-		if balance < e.config.PositionSize {
+		if balanceD.LessThan(decimal.NewFromFloat(e.config.PositionSize)) {
 			// 可用餘額不足以開下一個倉位 = 持倉全滿
 			dateKey := currentTime.Format("2006-01-02") // YYYY-MM-DD
 			fullPositionDays[dateKey] = true
@@ -622,10 +643,11 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 			// 檢查是否達到注資閾值
 			if e.idleCandles >= e.config.AutoFundingIdle {
 				// 記錄注資前狀態
-				balanceBefore := balance
+				balanceBefore := balanceD.InexactFloat64()
 
-				// 執行注資
-				balance += e.config.AutoFundingAmount
+				// 執行注資（使用 decimal）
+				fundingAmountD := decimal.NewFromFloat(e.config.AutoFundingAmount)
+				balanceD = balanceD.Add(fundingAmountD)
 
 				// ⭐ 增加待回收注資金額
 				e.pendingFunding += e.config.AutoFundingAmount
@@ -641,7 +663,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 					Amount:        e.config.AutoFundingAmount,
 					IdleCandles:   e.idleCandles,
 					BalanceBefore: balanceBefore,
-					BalanceAfter:  balance,
+					BalanceAfter:  balanceD.InexactFloat64(),
 					Price:         currentPrice.Value(),
 					CandleIndex:   i,
 					Recovered:     false, // 初始未回收 ⭐
@@ -652,7 +674,7 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 				e.idleCandles = 0
 
 				// 記錄資金快照（重要：讓計算器知道資金增加了）
-				e.calculator.RecordBalance(currentTime, balance)
+				e.calculator.RecordBalance(currentTime, balanceD.InexactFloat64())
 			}
 		}
 	}
@@ -692,23 +714,23 @@ func (e *BacktestEngine) Run(candles []value_objects.Candle) (metrics.BacktestRe
 	// }
 
 	// 記錄最終資金快照
-	e.calculator.RecordBalance(lastTime, balance)
+	e.calculator.RecordBalance(lastTime, balanceD.InexactFloat64())
 
 	// ========== 步驟 5: 計算回測指標（包含未實現盈虧）==========
 	result := e.calculator.Calculate(
 		e.positionTracker,
-		balance,
+		balanceD.InexactFloat64(),
 		lastPrice,
 		totalOpenedTrades,
-		totalProfitGross,
-		totalProfitGross_Entry, // ⭐ 新增：基于单笔开仓价的总利润
-		totalFeesOpen,
-		totalFeesClose,
+		totalProfitGrossD.InexactFloat64(),
+		totalProfitGross_EntryD.InexactFloat64(), // ⭐ 新增：基于单笔开仓价的总利润
+		totalFeesOpenD.InexactFloat64(),
+		totalFeesCloseD.InexactFloat64(),
 	)
 
 	// ⭐ 加入持倉全滿天數統計
 	result.FullPositionDays = len(fullPositionDays)
-	result.MaxOpenPositionValue = maxOpenPositionValue // ⭐ 加入最大持倉價值
+	result.MaxOpenPositionValue = maxOpenPositionValueD.InexactFloat64() // ⭐ 加入最大持倉價值
 
 	// ⭐ 輸出打平輪次統計報告
 	e.printBreakEvenRoundsReport()

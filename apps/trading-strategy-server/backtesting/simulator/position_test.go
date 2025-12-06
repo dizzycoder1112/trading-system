@@ -263,6 +263,117 @@ func TestPositionTracker_ClosePosition_MultiPosition(t *testing.T) {
 	t.Logf("   剩餘持倉: %.6f BTC，平均成本: %.2f", tracker.totalCoins, tracker.avgCost)
 }
 
+// ========== UnrealizedPnL Bug 測試 ==========
+
+// TestUnrealizedPnL_AfterPartialClose_Bug 測試部分平倉後兩種算法的差異
+// 這是當前 bug 的復現測試
+func TestUnrealizedPnL_AfterPartialClose_Bug(t *testing.T) {
+	tracker := NewPositionTracker()
+
+	// 開倉1: 100 USDT @ 2500 → 買入 0.04 BTC
+	pos1 := tracker.AddPosition(2500, 100, time.Now(), 2600)
+	coins1 := 100.0 / 2500.0 // 0.04 BTC
+
+	// 開倉2: 100 USDT @ 2600 → 買入 0.0385 BTC
+	tracker.AddPosition(2600, 100, time.Now(), 2700)
+	coins2 := 100.0 / 2600.0 // 0.0385 BTC
+
+	t.Logf("=== 開倉後狀態 ===")
+	t.Logf("開倉1: 100 USDT @ 2500 → %.6f BTC", coins1)
+	t.Logf("開倉2: 100 USDT @ 2600 → %.6f BTC", coins2)
+	t.Logf("totalCoins: %.6f", tracker.totalCoins)
+	t.Logf("avgCost: %.2f", tracker.avgCost)
+	t.Logf("totalSize: %.2f", tracker.GetTotalSize())
+
+	// 平倉1
+	tracker.ClosePosition(pos1.ID, 2600, time.Now(), 4.0)
+
+	t.Logf("\n=== 平倉1後狀態 ===")
+	t.Logf("totalCoins: %.6f (實際剩餘幣數)", tracker.totalCoins)
+	t.Logf("avgCost: %.2f (不變)", tracker.avgCost)
+	t.Logf("totalSize: %.2f (剩餘 position 的 Size)", tracker.GetTotalSize())
+
+	// 計算 totalSize / avgCost vs totalCoins
+	impliedCoins := tracker.GetTotalSize() / tracker.avgCost
+	actualCoins := tracker.totalCoins
+
+	t.Logf("\n=== 關鍵差異 ===")
+	t.Logf("totalSize / avgCost = %.6f (v1 隱含的幣數)", impliedCoins)
+	t.Logf("totalCoins = %.6f (v2 實際的幣數)", actualCoins)
+	t.Logf("差異: %.6f BTC", impliedCoins-actualCoins)
+
+	// 用 currentPrice = 2700 計算 UnrealizedPnL
+	currentPrice := 2700.0
+
+	// v1: totalSize * priceChangeRate
+	totalSize := tracker.GetTotalSize()
+	avgCost := tracker.avgCost
+	priceChangeRate := (currentPrice - avgCost) / avgCost
+	unrealizedPnL_v1 := totalSize * priceChangeRate
+
+	// v2: totalCoins * (currentPrice - avgCost)
+	unrealizedPnL_v2 := tracker.totalCoins * (currentPrice - avgCost)
+
+	t.Logf("\n=== UnrealizedPnL 計算 (currentPrice=%.0f) ===", currentPrice)
+	t.Logf("v1 (totalSize * rate): %.4f USDT", unrealizedPnL_v1)
+	t.Logf("v2 (coins * priceDiff): %.4f USDT", unrealizedPnL_v2)
+	t.Logf("差異: %.4f USDT", unrealizedPnL_v1-unrealizedPnL_v2)
+
+	// 驗證：v2 才是正確答案
+	// 剩餘的幣數是 0.0385 BTC（第二筆開倉買入的）
+	// 這些幣的成本是 2600，不是 avgCost 2549
+	// 但因為我們用 avgCost 計算，所以實際上兩種方法都有偏差
+	// 不過 v2 更接近實際情況
+
+	// 真正正確的算法應該是：
+	// 對每個未平倉位，用 (currentPrice - entryPrice) * coins 計算
+	expectedPnL := (currentPrice - 2600) * coins2 // 第二筆的實際盈虧
+	t.Logf("\n=== 真正正確的計算 ===")
+	t.Logf("第二筆實際盈虧: (%.0f - 2600) * %.6f = %.4f USDT", currentPrice, coins2, expectedPnL)
+
+	// 結論
+	t.Logf("\n=== 結論 ===")
+	t.Logf("v1 和 v2 的差異來自部分平倉後 totalSize/avgCost ≠ totalCoins")
+	t.Logf("v2 更接近實際（使用真實幣數），但仍然用 avgCost 而不是 entryPrice")
+
+	if unrealizedPnL_v1 == unrealizedPnL_v2 {
+		t.Error("預期 v1 和 v2 應該不同，但實際相同")
+	}
+}
+
+// TestUnrealizedPnL_NoPartialClose 測試沒有部分平倉時，兩種算法應該相等
+func TestUnrealizedPnL_NoPartialClose(t *testing.T) {
+	tracker := NewPositionTracker()
+
+	// 開倉1: 100 USDT @ 2500
+	tracker.AddPosition(2500, 100, time.Now(), 2600)
+
+	// 開倉2: 100 USDT @ 2600
+	tracker.AddPosition(2600, 100, time.Now(), 2700)
+
+	currentPrice := 2700.0
+
+	// v1
+	totalSize := tracker.GetTotalSize()
+	avgCost := tracker.avgCost
+	priceChangeRate := (currentPrice - avgCost) / avgCost
+	unrealizedPnL_v1 := totalSize * priceChangeRate
+
+	// v2
+	unrealizedPnL_v2 := tracker.totalCoins * (currentPrice - avgCost)
+
+	t.Logf("沒有部分平倉時:")
+	t.Logf("v1 = %.4f", unrealizedPnL_v1)
+	t.Logf("v2 = %.4f", unrealizedPnL_v2)
+	t.Logf("差異 = %.6f", unrealizedPnL_v1-unrealizedPnL_v2)
+
+	// 應該幾乎相等（允許浮點誤差）
+	diff := unrealizedPnL_v1 - unrealizedPnL_v2
+	if diff > 0.0001 || diff < -0.0001 {
+		t.Errorf("沒有部分平倉時，v1 和 v2 應該相等，但差異為 %.6f", diff)
+	}
+}
+
 // TestPositionTracker_ClosePosition_CoinsCalculation 對比正確/錯誤的幣數計算
 func TestPositionTracker_ClosePosition_CoinsCalculation(t *testing.T) {
 	tracker := NewPositionTracker()
@@ -273,7 +384,7 @@ func TestPositionTracker_ClosePosition_CoinsCalculation(t *testing.T) {
 	correctCoins := 100.0 / 2500.0 // 0.04 BTC
 
 	// 錯誤計算（如果用平均成本）
-	avgCost := tracker.avgCost  // ≈ 2549
+	avgCost := tracker.avgCost    // ≈ 2549
 	wrongCoins := 100.0 / avgCost // ≈ 0.0392 BTC
 
 	t.Logf("第一筆開倉實際買入: %.6f BTC @ 2500", correctCoins)
